@@ -87,10 +87,13 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 echo ""
 echo -e "${BLUE}[1/4]${NC} Downloading ${asset_name}..."
-if ! curl -fsSL -o "${tmp_dir}/${asset_name}" "$download_url"; then
-    echo -e "${RED}Download failed.${NC}"
-    echo "URL: ${download_url}"
-    exit 1
+if ! curl -fsSL --retry 3 --retry-delay 2 -o "${tmp_dir}/${asset_name}" "$download_url"; then
+    echo -e "${YELLOW}curl failed, falling back to wget...${NC}"
+    if ! wget --tries=3 --timeout=30 -q -O "${tmp_dir}/${asset_name}" "$download_url"; then
+        echo -e "${RED}Download failed.${NC}"
+        echo "URL: ${download_url}"
+        exit 1
+    fi
 fi
 
 echo -e "${BLUE}[2/4]${NC} Extracting..."
