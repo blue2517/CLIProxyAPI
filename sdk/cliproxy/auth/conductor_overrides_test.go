@@ -905,3 +905,49 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_MarkResult_TransientError504_ShortCooldown(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-504",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-4-6"
+	before := time.Now()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-504",
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 504, Message: "gateway timeout"},
+	})
+	after := time.Now()
+
+	updated, ok := m.GetByID("auth-504")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be set for 504")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown > 10*time.Second {
+		t.Fatalf("expected short cooldown for transient 504, got %v", cooldown)
+	}
+	if state.NextRetryAfter.Before(after.Add(4 * time.Second)) {
+		t.Fatalf("expected cooldown of ~5s, but NextRetryAfter=%v is too soon (now=%v)", state.NextRetryAfter, after)
+	}
+}

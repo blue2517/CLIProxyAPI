@@ -2845,7 +2845,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
+						case 408, 502, 504:
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								next := now.Add(5 * time.Second)
+								state.NextRetryAfter = next
+							}
+						case 500, 503:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
