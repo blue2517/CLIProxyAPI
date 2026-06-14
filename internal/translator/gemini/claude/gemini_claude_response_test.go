@@ -60,3 +60,58 @@ func TestConvertGeminiResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextBloc
 		t.Fatalf("DONE chunk must still emit message_stop after final events: %s", outputText)
 	}
 }
+
+func TestConvertGeminiResponseToClaude_ThinkingDisabled_SignatureDiscarded(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
+
+	// Text-only chunk (no thought flag)
+	textChunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "<block>no</block>"}]
+			}
+		}],
+		"modelVersion": "gemini-3-flash",
+		"responseId": "resp-cls"
+	}`)
+
+	// Trailing signature from Gemini 3.x (no thought flag)
+	sigChunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"thoughtSignature": "EjQKSomeSignature", "text": ""}]
+			},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 100,
+			"candidatesTokenCount": 5,
+			"totalTokenCount": 105
+		},
+		"modelVersion": "gemini-3-flash",
+		"responseId": "resp-cls"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", requestJSON, requestJSON, textChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", requestJSON, requestJSON, sigChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"type":"thinking"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT create thinking block: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"thinking_delta"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT create thinking deltas: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"signature_delta"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT emit signature delta: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"text"`) {
+		t.Fatalf("text content must remain as text block: %s", outputText)
+	}
+	if !strings.Contains(outputText, `<block>no</block>`) {
+		t.Fatalf("classifier text must be preserved: %s", outputText)
+	}
+}
