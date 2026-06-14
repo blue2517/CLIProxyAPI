@@ -21,16 +21,18 @@ type dashboardModel struct {
 	ready    bool
 
 	// Cached data for re-rendering on locale change
-	lastConfig    map[string]any
-	lastAuthFiles []map[string]any
-	lastAPIKeys   []string
+	lastConfig      map[string]any
+	lastAuthFiles   []map[string]any
+	lastAPIKeys     []string
+	lastProxyHealth map[string]any
 }
 
 type dashboardDataMsg struct {
-	config    map[string]any
-	authFiles []map[string]any
-	apiKeys   []string
-	err       error
+	config      map[string]any
+	authFiles   []map[string]any
+	apiKeys     []string
+	proxyHealth map[string]any
+	err         error
 }
 
 func newDashboardModel(client *Client) dashboardModel {
@@ -47,6 +49,7 @@ func (m dashboardModel) fetchData() tea.Msg {
 	cfg, cfgErr := m.client.GetConfig()
 	authFiles, authErr := m.client.GetAuthFiles()
 	apiKeys, keysErr := m.client.GetAPIKeys()
+	proxyHealth, _ := m.client.GetProxyHealth()
 
 	var err error
 	for _, e := range []error{cfgErr, authErr, keysErr} {
@@ -55,14 +58,14 @@ func (m dashboardModel) fetchData() tea.Msg {
 			break
 		}
 	}
-	return dashboardDataMsg{config: cfg, authFiles: authFiles, apiKeys: apiKeys, err: err}
+	return dashboardDataMsg{config: cfg, authFiles: authFiles, apiKeys: apiKeys, proxyHealth: proxyHealth, err: err}
 }
 
 func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		// Re-render immediately with cached data using new locale
-		m.content = m.renderDashboard(m.lastConfig, m.lastAuthFiles, m.lastAPIKeys)
+		m.content = m.renderDashboard(m.lastConfig, m.lastAuthFiles, m.lastAPIKeys, m.lastProxyHealth)
 		m.viewport.SetContent(m.content)
 		// Also fetch fresh data in background
 		return m, m.fetchData
@@ -77,8 +80,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.lastConfig = msg.config
 			m.lastAuthFiles = msg.authFiles
 			m.lastAPIKeys = msg.apiKeys
+			m.lastProxyHealth = msg.proxyHealth
 
-			m.content = m.renderDashboard(msg.config, msg.authFiles, msg.apiKeys)
+			m.content = m.renderDashboard(msg.config, msg.authFiles, msg.apiKeys, msg.proxyHealth)
 		}
 		m.viewport.SetContent(m.content)
 		return m, nil
@@ -117,7 +121,7 @@ func (m dashboardModel) View() string {
 	return m.viewport.View()
 }
 
-func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[string]any, apiKeys []string) string {
+func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[string]any, apiKeys []string, proxyHealth map[string]any) string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(T("dashboard_title")))
@@ -204,6 +208,33 @@ func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[stri
 				label string
 				value string
 			}{T("proxy_url"), proxyURL})
+
+			// Proxy health status
+			if proxyHealth != nil {
+				if monitored, ok := proxyHealth["monitored"].(bool); ok && monitored {
+					healthStatus := getString(proxyHealth, "status")
+					var healthDisplay string
+					switch healthStatus {
+					case "healthy":
+						healthDisplay = lipgloss.NewStyle().Foreground(colorSuccess).Render("● " + T("proxy_healthy"))
+					case "probing":
+						healthDisplay = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("● " + T("proxy_testing"))
+					case "disabled":
+						nextProbe := getString(proxyHealth, "next_probe_at")
+						display := T("proxy_disabled")
+						if nextProbe != "" {
+							display += " (" + T("proxy_next_probe") + ": " + nextProbe + ")"
+						}
+						healthDisplay = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("● " + display)
+					}
+					if healthDisplay != "" {
+						configItems = append(configItems, struct {
+							label string
+							value string
+						}{T("proxy_health"), healthDisplay})
+					}
+				}
+			}
 		}
 
 		// Render config items as a compact row
