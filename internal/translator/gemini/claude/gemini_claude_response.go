@@ -121,6 +121,15 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			}
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 
+			// Gemini 3.x emits thoughtSignature even when thinking was not
+			// requested. If the part lacks thought:true and we are not already
+			// inside a thinking block, discard the signature so it does not
+			// open a spurious thinking content block.
+			isThought := partResult.Get("thought").Bool()
+			if hasThoughtSignature && !isThought && (*param).(*Params).ResponseType != 2 {
+				hasThoughtSignature = false
+			}
+
 			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
 				appendSignatureDelta(thoughtSignatureResult.String())
 				continue
@@ -129,7 +138,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() || hasThoughtSignature {
+				if isThought || hasThoughtSignature {
 					if hasThoughtSignature && partTextResult.String() == "" {
 						appendSignatureDelta(thoughtSignatureResult.String())
 						continue

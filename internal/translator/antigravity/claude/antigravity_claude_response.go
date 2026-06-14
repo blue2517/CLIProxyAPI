@@ -205,6 +205,15 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			}
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" && !functionCallResult.Exists()
 
+			// Gemini 3.x emits thoughtSignature even when thinking was not
+			// requested. If the part lacks thought:true and we are not already
+			// inside a thinking block, discard the signature so it does not
+			// open a spurious thinking content block.
+			isThought := partResult.Get("thought").Bool()
+			if hasThoughtSignature && !isThought && params.ResponseType != 2 {
+				hasThoughtSignature = false
+			}
+
 			if hasThoughtSignature && !partTextResult.Exists() {
 				appendThinkingSignature(thoughtSignatureResult.String())
 				continue
@@ -213,7 +222,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() || hasThoughtSignature {
+				if isThought || hasThoughtSignature {
 					if hasThoughtSignature {
 						// log.Debug("Branch: signature_delta")
 
@@ -556,6 +565,12 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				sig = part.Get("thought_signature")
 			}
 			hasThoughtSignature := sig.Exists() && sig.String() != "" && !part.Get("functionCall").Exists()
+			// Discard trailing thoughtSignature when no thinking content
+			// has been accumulated — Gemini 3.x emits signatures even
+			// when thinking was not requested.
+			if hasThoughtSignature && !part.Get("thought").Bool() && thinkingBuilder.Len() == 0 {
+				hasThoughtSignature = false
+			}
 			isThought := part.Get("thought").Bool() || hasThoughtSignature
 			if hasThoughtSignature {
 				thinkingSignature = sig.String()
