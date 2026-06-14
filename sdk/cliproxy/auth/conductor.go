@@ -19,6 +19,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxyhealth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -3385,6 +3386,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+
+	// Notify proxy health monitor of transport-level failures (no HTTP status received).
+	if !result.Success && result.Error != nil && result.Error.HTTPStatus == 0 {
+		if monitor := proxyhealth.Global(); monitor != nil {
+			monitor.ReportNetworkError(result.Error.Message)
+		}
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

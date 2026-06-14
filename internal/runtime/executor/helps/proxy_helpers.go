@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxyhealth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -40,6 +41,13 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
 	if proxyURL == "" && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+
+	// Bypass global proxy if health monitor reports it as disabled
+	isGlobalProxy := proxyURL != "" && (auth == nil || strings.TrimSpace(auth.ProxyURL) == "")
+	if isGlobalProxy && proxyhealth.GlobalShouldBypass() {
+		proxyURL = ""
+		log.Debug("global proxy bypassed: health monitor reports proxy disabled")
 	}
 
 	// If we have a proxy URL configured, set up the transport
