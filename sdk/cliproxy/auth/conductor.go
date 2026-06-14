@@ -116,6 +116,9 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// IsCountTokens indicates this result came from a count_tokens request.
+	// A 404 from count_tokens means "endpoint unsupported", not "model not found".
+	IsCountTokens bool
 }
 
 // Selector chooses an auth candidate for execution.
@@ -1917,7 +1920,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, IsCountTokens: true}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -2811,7 +2814,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 							}
 						case 404:
-							if disableCooling {
+							if result.IsCountTokens {
+								state.NextRetryAfter = now.Add(5 * time.Second)
+							} else if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								next := now.Add(12 * time.Hour)
