@@ -125,6 +125,11 @@ func (c *Client) GetConfig() (map[string]any, error) {
 	return c.getJSON("/v0/management/config")
 }
 
+// GetProxyHealth fetches the proxy health status from the management API.
+func (c *Client) GetProxyHealth() (map[string]any, error) {
+	return c.getJSON("/v0/management/proxy-health")
+}
+
 // GetConfigYAML fetches the raw config.yaml content.
 func (c *Client) GetConfigYAML() (string, error) {
 	data, err := c.get("/v0/management/config.yaml")

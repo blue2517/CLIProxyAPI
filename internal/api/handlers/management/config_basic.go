@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxyhealth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -325,4 +326,31 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
+}
+
+// GetProxyHealth returns the proxy health monitor status.
+func (h *Handler) GetProxyHealth(c *gin.Context) {
+	monitor := proxyhealth.Global()
+	if monitor == nil {
+		c.JSON(200, gin.H{"status": "healthy", "monitored": false})
+		return
+	}
+	state := monitor.GetState()
+	resp := gin.H{
+		"status":        state.Status.String(),
+		"proxy_url":     state.ProxyURL,
+		"backoff_level": state.BackoffLevel,
+		"last_error":    state.LastError,
+		"monitored":     true,
+	}
+	if !state.DisabledAt.IsZero() {
+		resp["disabled_at"] = state.DisabledAt.Format(time.RFC3339)
+	}
+	if !state.NextProbeAt.IsZero() {
+		resp["next_probe_at"] = state.NextProbeAt.Format(time.RFC3339)
+	}
+	if !state.LastProbeAt.IsZero() {
+		resp["last_probe_at"] = state.LastProbeAt.Format(time.RFC3339)
+	}
+	c.JSON(200, resp)
 }
