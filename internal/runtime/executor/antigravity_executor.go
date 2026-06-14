@@ -1659,6 +1659,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	payload = helps.DeleteJSONField(payload, "model")
 	payload = helps.DeleteJSONField(payload, "request.safetySettings")
 
+	// Workaround: Antigravity's countTokens endpoint ignores tools when counting,
+	// returning incorrect totals. Flatten tools into a text content part so they
+	// get counted, then remove the tools field.
+	payload = flattenToolsForCountTokens(payload)
+
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -1779,6 +1784,40 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	default:
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
 	}
+}
+
+// flattenToolsForCountTokens works around Antigravity's countTokens endpoint
+// ignoring tools in token calculation. It serializes tools as compact JSON text,
+// appends them as a content part, and removes the tools field so countTokens
+// counts everything via contents alone.
+func flattenToolsForCountTokens(payload []byte) []byte {
+	tools := gjson.GetBytes(payload, "request.tools")
+	if !tools.Exists() || tools.Type == gjson.Null || (tools.IsArray() && len(tools.Array()) == 0) {
+		return payload
+	}
+
+	toolsText := tools.Raw
+
+	// Append a new content entry with the serialized tools text
+	newPart := map[string]interface{}{
+		"role":  "user",
+		"parts": []map[string]string{{"text": toolsText}},
+	}
+	partJSON, errMarshal := json.Marshal(newPart)
+	if errMarshal != nil {
+		return payload
+	}
+
+	updated, errAppend := sjson.SetRawBytes(payload, "request.contents.-1", partJSON)
+	if errAppend != nil {
+		return payload
+	}
+
+	updated, errDel := sjson.DeleteBytes(updated, "request.tools")
+	if errDel != nil {
+		return updated
+	}
+	return updated
 }
 
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
