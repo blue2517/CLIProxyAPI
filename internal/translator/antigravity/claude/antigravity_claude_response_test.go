@@ -755,3 +755,114 @@ func TestConvertAntigravityResponseToClaudeNonStream_SignatureOnlyPartWithoutTho
 		t.Fatalf("expected signature %q, got %q: %s", validSignature, got, output)
 	}
 }
+
+// TestConvertAntigravityResponseToClaude_ThinkingDisabled_SignatureDiscarded tests
+// the fix for the Claude Code auto-mode classifier issue: when thinking is disabled
+// (no thought:true in any part), a trailing thoughtSignature from Gemini 3.x must
+// NOT open a thinking block. The text content must remain as text blocks.
+func TestConvertAntigravityResponseToClaude_ThinkingDisabled_SignatureDiscarded(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	requestJSON := []byte(`{
+		"model": "gemini-3-flash-agent",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Test"}]}]
+	}`)
+
+	// Chunk 1: regular text (no thought flag)
+	chunk1 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "<block>no</block>"}]
+				}
+			}],
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-classifier"
+		}
+	}`)
+
+	// Chunk 2: trailing signature-only part (no thought flag) — Gemini 3.x behavior
+	chunk2 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"thoughtSignature": "EjQKMgEMSomeSignatureHere", "text": ""}]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 100,
+				"candidatesTokenCount": 5,
+				"totalTokenCount": 105
+			},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-classifier"
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"type":"thinking"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT create a thinking block: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"thinking_delta"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT create thinking deltas: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"signature_delta"`) {
+		t.Fatalf("trailing thoughtSignature without thought:true must NOT emit signature delta: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"text"`) {
+		t.Fatalf("text content must appear as text block, not thinking: %s", outputText)
+	}
+	if !strings.Contains(outputText, `<block>no</block>`) {
+		t.Fatalf("classifier response text must be preserved: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"message_stop"`) {
+		t.Fatalf("must emit message_stop: %s", outputText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_ThinkingDisabled_SignatureDiscarded(t *testing.T) {
+	previousCache := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	defer cache.SetSignatureCacheEnabled(previousCache)
+
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [
+						{"text": "<block>no</block>"},
+						{"text": "", "thoughtSignature": "EjQKMgEMSomeSignatureHere"}
+					]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 100,
+				"candidatesTokenCount": 5,
+				"totalTokenCount": 105
+			},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-classifier"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 1 {
+		t.Fatalf("expected exactly one content block, got %d: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.type").String(); got != "text" {
+		t.Fatalf("expected text content block, got %q: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.text").String(); got != "<block>no</block>" {
+		t.Fatalf("expected classifier text preserved, got %q: %s", got, output)
+	}
+}
