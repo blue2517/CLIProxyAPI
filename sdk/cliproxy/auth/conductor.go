@@ -2306,6 +2306,23 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+
+		// Apply the per-credential count_tokens policy before contacting upstream.
+		// Skip when this request was already redirected (loop guard).
+		if _, redirected := ctx.Value(countTokensRedirectContextKey{}).(struct{}); !redirected {
+			switch mode, redirectModel := m.countTokensPolicyForAuth(auth); mode {
+			case internalconfig.CountTokensModeDisabled:
+				// Short-circuit with a terminal 404 so the client falls back fast.
+				return cliproxyexecutor.Response{}, &countTokensDisabledError{}
+			case internalconfig.CountTokensModeRedirect:
+				if resp, ok, errRedirect := m.redirectCountTokens(ctx, redirectModel, provider, routeModel, req, opts, maxRetryCredentials); ok {
+					return resp, errRedirect
+				}
+				// Redirect not applicable (e.g. same provider or unknown target);
+				// fall through to the normal forward path below.
+			}
+		}
+
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -2943,6 +2960,101 @@ func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatNa
 	return nil
 }
 
+// countTokensRedirectContextKey guards against redirect loops: once a
+// count_tokens request has been redirected to another model/channel, further
+// redirects are ignored and the request is forwarded normally.
+type countTokensRedirectContextKey struct{}
+
+// countTokensDisabledError marks a count_tokens request rejected by the
+// per-credential "disabled" policy. It carries a 404 status and is terminal:
+// the manager never retries it and never applies a cooldown, so the client
+// receives a fast 404 and can fall back to its own token estimation.
+type countTokensDisabledError struct{ msg string }
+
+func (e *countTokensDisabledError) Error() string {
+	if e == nil || e.msg == "" {
+		return "count_tokens disabled for this credential"
+	}
+	return e.msg
+}
+
+func (e *countTokensDisabledError) StatusCode() int { return http.StatusNotFound }
+
+// countTokensPolicyForAuth returns the configured count_tokens policy for the
+// given auth, defaulting to "forward" when unset. The policy is read from the
+// matching credential's config entry, mirroring resolveUpstreamModelForAPIKey.
+func (m *Manager) countTokensPolicyForAuth(auth *Auth) (mode, redirectModel string) {
+	if m == nil || auth == nil {
+		return internalconfig.CountTokensModeForward, ""
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return internalconfig.CountTokensModeForward, ""
+	}
+	var policy *internalconfig.CountTokensConfig
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "gemini":
+		if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+			policy = entry.CountTokens
+		}
+	case "claude":
+		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
+			policy = entry.CountTokens
+		}
+	case "codex":
+		if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
+			policy = entry.CountTokens
+		}
+	default:
+		providerKey, compatName := "", ""
+		if len(auth.Attributes) > 0 {
+			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+		}
+		if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+			policy = entry.CountTokens
+		}
+	}
+	if policy == nil {
+		return internalconfig.CountTokensModeForward, ""
+	}
+	mode = strings.ToLower(strings.TrimSpace(policy.Mode))
+	if mode == "" {
+		mode = internalconfig.CountTokensModeForward
+	}
+	return mode, strings.TrimSpace(policy.RedirectModel)
+}
+
+// redirectCountTokens re-runs a count_tokens request against the channel that
+// serves redirectModel (resolved via the model registry). It returns ok=false
+// when the redirect cannot be applied — unknown target model, no executor, or a
+// no-op redirect back to the current provider with the same model — so the
+// caller can fall through to the normal forward path.
+func (m *Manager) redirectCountTokens(ctx context.Context, redirectModel, currentProvider, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, bool, error) {
+	redirectModel = strings.TrimSpace(redirectModel)
+	if redirectModel == "" {
+		return cliproxyexecutor.Response{}, false, nil
+	}
+	targetProviders := m.normalizeProviders(util.GetProviderName(redirectModel))
+	if len(targetProviders) == 0 {
+		return cliproxyexecutor.Response{}, false, nil
+	}
+	// No-op when the redirect resolves to the same provider and model already in use.
+	if len(targetProviders) == 1 &&
+		strings.EqualFold(targetProviders[0], strings.TrimSpace(currentProvider)) &&
+		strings.EqualFold(redirectModel, strings.TrimSpace(routeModel)) {
+		return cliproxyexecutor.Response{}, false, nil
+	}
+
+	redirectReq := req
+	redirectReq.Model = redirectModel
+
+	// Mark the context so the redirected attempt does not re-apply any policy.
+	redirectCtx := context.WithValue(ctx, countTokensRedirectContextKey{}, struct{}{})
+	resp, err := m.executeCountMixedOnce(redirectCtx, targetProviders, redirectReq, opts, maxRetryCredentials)
+	return resp, true, err
+}
+
 func asModelAliasEntries[T interface {
 	GetName() string
 	GetAlias() string
@@ -3147,6 +3259,11 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
+		return 0, false
+	}
+	// A "disabled" count_tokens policy is terminal: never retry or wait.
+	var disabledErr *countTokensDisabledError
+	if errors.As(err, &disabledErr) {
 		return 0, false
 	}
 	if maxWait <= 0 {

@@ -427,6 +427,53 @@ type CloakConfig struct {
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
+// CountTokensConfig controls how count_tokens requests (e.g. Claude's
+// /v1/messages/count_tokens) are handled for a credential. An empty/"forward"
+// mode preserves the default proxy behavior. Many upstream channels do not
+// support the count_tokens endpoint and return 404, which makes clients such as
+// Claude Code slow; "disabled" lets the proxy short-circuit with a fast 404 so
+// the client falls back to its own estimation, while "redirect" routes the count
+// to a different model/channel that does support it.
+type CountTokensConfig struct {
+	// Mode is one of "forward" (default), "disabled", or "redirect".
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// RedirectModel is the target model name used when Mode == "redirect".
+	// The model name determines which provider/channel handles the count.
+	RedirectModel string `yaml:"redirect-model,omitempty" json:"redirect-model,omitempty"`
+}
+
+// Count-tokens policy modes.
+const (
+	CountTokensModeForward  = "forward"
+	CountTokensModeDisabled = "disabled"
+	CountTokensModeRedirect = "redirect"
+)
+
+// NormalizeCountTokens trims and validates a count-tokens config. It returns nil
+// when the config carries no meaningful override (default "forward" behavior),
+// so empty objects don't clutter the persisted config.
+func NormalizeCountTokens(c *CountTokensConfig) *CountTokensConfig {
+	if c == nil {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.Mode))
+	redirectModel := strings.TrimSpace(c.RedirectModel)
+	switch mode {
+	case CountTokensModeDisabled:
+		return &CountTokensConfig{Mode: CountTokensModeDisabled}
+	case CountTokensModeRedirect:
+		if redirectModel == "" {
+			// Redirect without a target is meaningless; fall back to default.
+			return nil
+		}
+		return &CountTokensConfig{Mode: CountTokensModeRedirect, RedirectModel: redirectModel}
+	default:
+		// "forward", empty, or unknown modes preserve default behavior.
+		return nil
+	}
+}
+
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
@@ -466,6 +513,9 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// CountTokens controls handling of count_tokens requests for this credential.
+	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -517,6 +567,9 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// CountTokens controls handling of count_tokens requests for this credential.
+	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -564,6 +617,9 @@ type GeminiKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// CountTokens controls handling of count_tokens requests for this credential.
+	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
@@ -611,6 +667,9 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// CountTokens controls handling of count_tokens requests for this provider.
+	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -942,6 +1001,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.CountTokens = NormalizeCountTokens(e.CountTokens)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -964,6 +1024,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		e.CountTokens = NormalizeCountTokens(e.CountTokens)
 		if e.BaseURL == "" {
 			continue
 		}
@@ -982,6 +1043,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.CountTokens = NormalizeCountTokens(entry.CountTokens)
 	}
 }
 
@@ -1005,6 +1067,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.CountTokens = NormalizeCountTokens(entry.CountTokens)
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
 		if _, exists := seen[uniqueKey]; exists {
 			continue
