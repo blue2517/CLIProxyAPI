@@ -705,6 +705,18 @@ attemptLoop:
 				return resp, err
 			}
 
+			// Reject empty-content 200 responses (gemini-3.1-pro sometimes
+			// returns finishReason=STOP with no usable parts); retry the same
+			// auth, then surface a 502 so the conductor fails over.
+			if !antigravityResponseHasUsableContent(bodyBytes) {
+				if attempt+1 < attempts {
+					log.Debugf("antigravity executor: empty content response for model %s, retrying (attempt %d/%d)", baseModel, attempt+1, attempts)
+					continue attemptLoop
+				}
+				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned empty content response"}
+				return resp, err
+			}
+
 			// Success
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
@@ -972,6 +984,18 @@ attemptLoop:
 				}
 			}
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
+
+			// Reject empty-content 200 responses (gemini-3.1-pro sometimes
+			// returns finishReason=STOP with no usable parts); retry the same
+			// auth, then surface a 502 so the conductor fails over.
+			if !antigravityResponseHasUsableContent(resp.Payload) {
+				if attempt+1 < attempts {
+					log.Debugf("antigravity executor: empty content response for model %s, retrying (attempt %d/%d)", baseModel, attempt+1, attempts)
+					continue attemptLoop
+				}
+				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned empty content response"}
+				return resp, err
+			}
 
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
 			var param any
@@ -1397,6 +1421,24 @@ attemptLoop:
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
+
+				emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+					select {
+					case out <- chunk:
+						return true
+					case <-ctx.Done():
+						return false
+					}
+				}
+
+				// Buffer leading contentless chunks (e.g. message_start) until the
+				// first usable content arrives. gemini-3.1-pro sometimes returns
+				// finishReason=STOP with no usable parts and zero output tokens;
+				// forwarding the lone message_start yields a malformed empty stream
+				// that downstream clients reject. Holding the preamble lets us emit
+				// a 502 error chunk instead, so the conductor fails over.
+				var pending [][]byte
+				sawUsableContent := false
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -1414,33 +1456,53 @@ attemptLoop:
 						reporter.Publish(ctx, detail)
 					}
 
+					if !sawUsableContent && antigravityResponseHasUsableContent(payload) {
+						sawUsableContent = true
+					}
+
 					chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
+					if !sawUsableContent {
+						for i := range chunks {
+							pending = append(pending, chunks[i])
+						}
+						continue
+					}
+					for i := range pending {
+						if !emit(cliproxyexecutor.StreamChunk{Payload: pending[i]}) {
+							return
+						}
+					}
+					pending = nil
 					for i := range chunks {
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-						case <-ctx.Done():
+						if !emit(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 							return
 						}
 					}
 				}
-				tail := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
-				for i := range tail {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
-					case <-ctx.Done():
-						return
-					}
-				}
+
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx, errScan)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-					case <-ctx.Done():
-					}
-				} else {
-					reporter.EnsurePublished(ctx)
+					emit(cliproxyexecutor.StreamChunk{Err: errScan})
+					return
 				}
+
+				if !sawUsableContent {
+					emptyErr := statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned empty content response"}
+					log.Debugf("antigravity executor: empty content stream for model %s, returning 502 to fail over", baseModel)
+					helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+					reporter.PublishFailure(ctx, emptyErr)
+					emit(cliproxyexecutor.StreamChunk{Err: emptyErr})
+					return
+				}
+
+				tail := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
+				for i := range tail {
+					if !emit(cliproxyexecutor.StreamChunk{Payload: tail[i]}) {
+						return
+					}
+				}
+				reporter.EnsurePublished(ctx)
 			}(httpResp)
 			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 		}
@@ -2377,6 +2439,50 @@ func antigravityShouldRetrySoftRateLimit(statusCode int, body []byte) bool {
 
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
+}
+
+// antigravityPartHasUsableContent reports whether a single candidate part carries
+// content a client could act on: non-empty text, a function call, or inline data.
+// A part holding only a thoughtSignature (which Gemini 3.x emits even when no
+// thinking was requested) does not count as usable content.
+func antigravityPartHasUsableContent(part gjson.Result) bool {
+	if part.Get("functionCall").Exists() {
+		return true
+	}
+	if part.Get("inlineData").Exists() || part.Get("inline_data").Exists() {
+		return true
+	}
+	if text := part.Get("text"); text.Exists() && strings.TrimSpace(text.String()) != "" {
+		return true
+	}
+	return false
+}
+
+// antigravityResponseHasUsableContent reports whether a non-streaming Antigravity
+// response (or a single streamed chunk) carries usable content in any candidate.
+// gemini-3.1-pro occasionally returns finishReason=STOP with empty parts and zero
+// output tokens; such responses translate to a null/empty Claude body that
+// downstream clients reject as malformed, so callers retry instead of forwarding.
+func antigravityResponseHasUsableContent(rawJSON []byte) bool {
+	candidates := gjson.GetBytes(rawJSON, "response.candidates")
+	if !candidates.Exists() {
+		candidates = gjson.GetBytes(rawJSON, "candidates")
+	}
+	if !candidates.IsArray() {
+		return false
+	}
+	for _, candidate := range candidates.Array() {
+		parts := candidate.Get("content.parts")
+		if !parts.IsArray() {
+			continue
+		}
+		for _, part := range parts.Array() {
+			if antigravityPartHasUsableContent(part) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func antigravitySoftRateLimitDelay(attempt int) time.Duration {
