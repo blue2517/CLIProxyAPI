@@ -40,6 +40,35 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `test/` — Cross-module integration tests
 
+### Request Pipeline
+Client → Gin middleware (logging, CORS, auth via `sdkaccess.Manager`) → protocol multiplexer (HTTP / Redis queue / WebSocket) → route → handler (openai/claude/gemini) → plugin `RequestInterceptor` → auth selector (round-robin / fill-first / session-affinity) → request translator → thinking pipeline → executor (provider HTTP/WS) → response translator → plugin `ResponseInterceptor` → signature cache → client.
+
+### Provider Matrix
+Several providers do not have a dedicated executor — they reuse the OpenAI-compatible or Gemini executor via translators:
+
+| Provider      | Auth          | Executor                              |
+|---------------|---------------|---------------------------------------|
+| Claude        | PKCE OAuth    | `claude_executor`                     |
+| Codex (REST)  | PKCE OAuth    | `codex_executor`                      |
+| Codex (WS)    | PKCE OAuth    | `codex_websockets_executor`           |
+| Gemini        | API key/OAuth | `gemini_executor`                     |
+| Gemini CLI    | Gemini auth   | via `gemini_executor`                 |
+| OpenAI Compat | API key       | `openai_compat_executor`              |
+| Antigravity   | OAuth         | via gemini / openai-compat            |
+| xAI           | PKCE OAuth    | via openai-compat                     |
+| Kimi          | Token         | via openai-compat                     |
+| Vertex AI     | GCP creds     | via gemini                            |
+
+### Translation Matrix
+Translators live at `internal/translator/{source}/{target}/` and convert request/response between two API formats. Source formats received from clients: `openai`, `claude`, `gemini`, `gemini-cli`, `codex`, `antigravity`. Any source can target a provider via its translator pair (e.g. an OpenAI request reaching a Claude upstream uses `openai/claude`).
+
+### Key Architectural Invariants
+1. **Canonical thinking representation**: all thinking configs normalize to `ThinkingConfig` first, then translate per-provider — never bypass this (see `internal/thinking/`).
+2. **Suffix-based overrides**: model-name suffixes like `model(high)` override body thinking config (suffix > body).
+3. **No timeouts after connection**: timeouts only during credential acquisition (see exceptions in Code Conventions).
+4. **Hot-reload**: config changes flow watcher → diff → synthesizer → reload without restart.
+5. **Signature cache**: thinking-block signatures are cached for Claude/Antigravity multi-turn continuity (`internal/cache/`, `internal/signature/`).
+
 ## Code Conventions
 - Keep changes small and simple (KISS)
 - Comments in English only
