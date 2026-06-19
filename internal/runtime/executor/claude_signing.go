@@ -79,3 +79,11 @@ func experimentalCCHSigningEnabled(cfg *config.Config, auth *cliproxyauth.Auth) 
 	entry := resolveClaudeKeyConfig(cfg, auth)
 	return entry != nil && entry.ExperimentalCCHSigning
 }
+
+// claudeFakeNonStreamEnabled reports whether the matching Claude credential opted
+// into the fake-non-stream behavior (issue non-streaming requests as streaming
+// upstream, then aggregate back into a single response).
+func claudeFakeNonStreamEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	return entry != nil && entry.FakeNonStream
+}

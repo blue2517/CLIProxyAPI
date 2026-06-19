@@ -205,7 +205,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
-	stream := from != to
+	// fakeNonStream forces the claude->claude identity path to stream upstream and
+	// aggregate back, working around upstreams with an unreliable non-stream path.
+	fakeNonStream := from == to && claudeFakeNonStreamEnabled(e.cfg, auth)
+	stream := from != to || fakeNonStream
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -214,6 +217,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	if fakeNonStream {
+		// The identity translator does not inject the stream flag; force it so the
+		// upstream returns SSE that we aggregate below.
+		body, _ = sjson.SetBytes(body, "stream", true)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -362,6 +370,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+	if fakeNonStream {
+		// The claude->claude identity translator would return the raw SSE as-is, so
+		// collapse the stream into a single Messages response before translating.
+		data = helps.AggregateClaudeSSEToMessages(data)
+	}
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,

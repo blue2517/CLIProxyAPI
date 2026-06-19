@@ -516,6 +516,11 @@ type ClaudeKey struct {
 
 	// CountTokens controls handling of count_tokens requests for this credential.
 	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
+
+	// FakeNonStream forces non-streaming requests to be issued to the upstream as
+	// streaming and then aggregated back into a single non-streaming response.
+	// Use when an upstream's non-streaming path is unreliable.
+	FakeNonStream bool `yaml:"fake-non-stream,omitempty" json:"fake-non-stream,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -570,6 +575,11 @@ type CodexKey struct {
 
 	// CountTokens controls handling of count_tokens requests for this credential.
 	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
+
+	// FakeNonStream forces non-streaming requests to be issued to the upstream as
+	// streaming and then aggregated back into a single non-streaming response.
+	// Use when an upstream's non-streaming path is unreliable.
+	FakeNonStream bool `yaml:"fake-non-stream,omitempty" json:"fake-non-stream,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -620,6 +630,11 @@ type GeminiKey struct {
 
 	// CountTokens controls handling of count_tokens requests for this credential.
 	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
+
+	// FakeNonStream forces non-streaming requests to be issued to the upstream as
+	// streaming and then aggregated back into a single non-streaming response.
+	// Use when an upstream's non-streaming path is unreliable.
+	FakeNonStream bool `yaml:"fake-non-stream,omitempty" json:"fake-non-stream,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
@@ -670,6 +685,11 @@ type OpenAICompatibility struct {
 
 	// CountTokens controls handling of count_tokens requests for this provider.
 	CountTokens *CountTokensConfig `yaml:"count-tokens,omitempty" json:"count-tokens,omitempty"`
+
+	// FakeNonStream forces non-streaming requests to be issued to the upstream as
+	// streaming and then aggregated back into a single non-streaming response.
+	// Use when an upstream's non-streaming path is unreliable.
+	FakeNonStream bool `yaml:"fake-non-stream,omitempty" json:"fake-non-stream,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

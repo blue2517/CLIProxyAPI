@@ -141,9 +141,18 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			action = "countTokens"
 		}
 	}
+	// fakeNonStream issues a streaming generateContent request and aggregates the
+	// SSE back into a single response, for upstreams with an unreliable non-stream
+	// path. It does not apply to countTokens.
+	fakeNonStream := action == "generateContent" && e.geminiFakeNonStreamEnabled(auth)
 	baseURL := resolveGeminiBaseURL(auth)
+	if fakeNonStream {
+		action = "streamGenerateContent"
+	}
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
-	if opts.Alt != "" && action != "countTokens" {
+	if fakeNonStream {
+		url = url + "?alt=sse"
+	} else if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 
@@ -203,6 +212,11 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if fakeNonStream {
+		// Collapse the streamed SSE into a single GenerateContentResponse before
+		// usage parsing and translation back to the client format.
+		data = helps.AggregateGeminiSSEToGenerateContent(data)
+	}
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
@@ -467,6 +481,13 @@ func resolveGeminiBaseURL(auth *cliproxyauth.Auth) string {
 		return glEndpoint
 	}
 	return base
+}
+
+// geminiFakeNonStreamEnabled reports whether the matching Gemini credential opted
+// into the fake-non-stream behavior.
+func (e *GeminiExecutor) geminiFakeNonStreamEnabled(auth *cliproxyauth.Auth) bool {
+	entry := e.resolveGeminiConfig(auth)
+	return entry != nil && entry.FakeNonStream
 }
 
 func (e *GeminiExecutor) resolveGeminiConfig(auth *cliproxyauth.Auth) *config.GeminiKey {
