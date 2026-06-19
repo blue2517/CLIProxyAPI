@@ -282,6 +282,11 @@ nonstream-keepalive-interval: 0
 #       redirect-model: ""           # when mode=redirect, count tokens using this model's channel (e.g. an Antigravity model)
 #                                    # The same count-tokens block is supported on gemini-api-key, codex-api-key,
 #                                    # and openai-compatibility entries.
+#     fake-non-stream: false         # optional: default is false; when true, non-streaming requests are issued to
+#                                    # the upstream as streaming and then aggregated back into a single non-streaming
+#                                    # response. Use when an upstream's non-streaming path is unreliable (e.g. random
+#                                    # 500s) while its streaming path is stable. Supported on claude/gemini/codex
+#                                    # api-key and openai-compatibility entries.
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks

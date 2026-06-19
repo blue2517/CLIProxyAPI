@@ -106,17 +106,27 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
+	// fakeNonStream forces a non-streaming request to be issued upstream as
+	// streaming and aggregated back, working around upstreams whose non-stream
+	// path is unreliable. Only applies to the chat/completions path.
+	fakeNonStream := !opts.Stream && endpoint == "/chat/completions" && e.fakeNonStreamEnabled(auth)
+	streamUpstream := opts.Stream || fakeNonStream
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, streamUpstream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, streamUpstream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
+	}
+	if fakeNonStream {
+		translated, _ = sjson.SetBytes(translated, "stream", true)
+		// Ask compatible upstreams to include usage in the final SSE chunk.
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -189,6 +199,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if fakeNonStream {
+		// Collapse the upstream SSE stream into a single chat.completion object
+		// before usage parsing and translation back to the client format.
+		body = helps.AggregateOpenAISSEToChatCompletion(body)
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -771,6 +786,13 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+// fakeNonStreamEnabled reports whether the matching OpenAI-compatible provider
+// opted into the fake-non-stream behavior.
+func (e *OpenAICompatExecutor) fakeNonStreamEnabled(auth *cliproxyauth.Auth) bool {
+	entry := e.resolveCompatConfig(auth)
+	return entry != nil && entry.FakeNonStream
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
