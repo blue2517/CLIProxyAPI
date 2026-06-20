@@ -92,8 +92,8 @@ var (
 	randSourceMutex                   sync.Mutex
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
-	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
-	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
+	antigravityCreditsBalanceByAuth   sync.Map // auth.ID -> antigravityCreditsBalance
+	antigravityCreditsHintRefreshByID sync.Map // auth.ID -> *antigravityCreditsHintRefreshState
 	antigravityRefreshGroup           singleflight.Group
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
@@ -749,11 +749,14 @@ attemptLoop:
 						}
 						log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 					}
+					err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+					return resp, err
 				case antigravity429DecisionFullQuotaExhausted:
 					if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 						markAntigravityCreditsPermanentlyDisabled(auth)
 					}
-					// No credits logic - just fall through to error return below
+					err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+					return resp, err
 				}
 			}
 
@@ -971,11 +974,14 @@ attemptLoop:
 							}
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 						}
+						err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+						return resp, err
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+						return resp, err
 					}
 				}
 
@@ -1440,11 +1446,14 @@ attemptLoop:
 							}
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
 						}
+						err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+						return nil, err
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+						return nil, err
 					}
 				}
 
@@ -2153,6 +2162,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 
 	authID := strings.TrimSpace(auth.ID)
 	paidTierID := strings.TrimSpace(gjson.GetBytes(bodyBytes, "paidTier.id").String())
+	if buckets := antigravityAvailableQuotaBuckets(bodyBytes); len(buckets) > 0 {
+		markAntigravityCooldownBucketsAvailable(auth, buckets)
+	}
 
 	credits := gjson.GetBytes(bodyBytes, "paidTier.availableCredits")
 	if !credits.IsArray() {
@@ -2196,6 +2208,131 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		}
 		return
 	}
+}
+
+func markAntigravityCooldownBucketsAvailable(auth *cliproxyauth.Auth, buckets []string) {
+	if auth == nil || len(buckets) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(buckets))
+	out := make([]string, 0, len(buckets))
+	for _, bucket := range buckets {
+		bucket = strings.TrimSpace(bucket)
+		if bucket == "" {
+			continue
+		}
+		if _, ok := seen[bucket]; ok {
+			continue
+		}
+		seen[bucket] = struct{}{}
+		out = append(out, bucket)
+	}
+	if len(out) == 0 {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata[cliproxyauth.AntigravityCooldownClearMetadata] = out
+}
+
+func antigravityAvailableQuotaBuckets(body []byte) []string {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	var buckets []string
+	collectAntigravityAvailableQuotaBuckets(gjson.ParseBytes(body), &buckets)
+	return buckets
+}
+
+func collectAntigravityAvailableQuotaBuckets(node gjson.Result, buckets *[]string) {
+	if !node.Exists() {
+		return
+	}
+	if node.IsArray() {
+		for _, child := range node.Array() {
+			collectAntigravityAvailableQuotaBuckets(child, buckets)
+		}
+		return
+	}
+	if !node.IsObject() {
+		return
+	}
+	if bucket, ok := antigravityQuotaBucketFromObject(node); ok && antigravityQuotaObjectHasAvailablePercent(node) {
+		*buckets = append(*buckets, bucket)
+	}
+	node.ForEach(func(_, child gjson.Result) bool {
+		collectAntigravityAvailableQuotaBuckets(child, buckets)
+		return true
+	})
+}
+
+func antigravityQuotaBucketFromObject(node gjson.Result) (string, bool) {
+	text := strings.ToLower(strings.Join([]string{
+		node.Get("id").String(),
+		node.Get("name").String(),
+		node.Get("displayName").String(),
+		node.Get("display_name").String(),
+		node.Get("label").String(),
+		node.Get("model").String(),
+		node.Get("modelName").String(),
+		node.Get("model_name").String(),
+		node.Get("quotaType").String(),
+		node.Get("quota_type").String(),
+	}, " "))
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", false
+	}
+	if strings.Contains(text, "gemini") {
+		return cliproxyauth.AntigravityGeminiQuotaBucket, true
+	}
+	if strings.Contains(text, "claude") || strings.Contains(text, "gpt") || strings.Contains(text, "openai") {
+		return cliproxyauth.AntigravityClaudeGPTQuotaBucket, true
+	}
+	return "", false
+}
+
+func antigravityQuotaObjectHasAvailablePercent(node gjson.Result) bool {
+	keys := []string{
+		"remainingPercent", "remaining_percent", "availablePercent", "available_percent",
+		"quotaPercent", "quota_percent", "percent", "percentage",
+		"usageRemainingPercent", "usage_remaining_percent", "availablePercentage", "available_percentage",
+	}
+	for _, key := range keys {
+		value := node.Get(key)
+		if !value.Exists() {
+			continue
+		}
+		if antigravityPositiveNumber(value) {
+			return true
+		}
+	}
+	if remaining := node.Get("remaining"); remaining.Exists() && antigravityPositiveNumber(remaining) {
+		if total := node.Get("total"); total.Exists() && antigravityPositiveNumber(total) {
+			return true
+		}
+	}
+	if used := node.Get("used"); used.Exists() {
+		if total := node.Get("total"); total.Exists() && antigravityPositiveNumber(total) && used.Float() < total.Float() {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityPositiveNumber(value gjson.Result) bool {
+	if !value.Exists() {
+		return false
+	}
+	if value.Type == gjson.Number {
+		return value.Float() > 0
+	}
+	if value.Type == gjson.String {
+		parsed, errParse := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(value.String()), "%"), 64)
+		return errParse == nil && parsed > 0
+	}
+	return false
 }
 
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {

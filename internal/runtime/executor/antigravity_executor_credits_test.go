@@ -311,6 +311,70 @@ func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 	}
 }
 
+func TestAntigravityExecute_QuotaRetryAfterDoesNotFallbackBaseURL(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var primaryRequests int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryRequests++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 429,
+				"message": "Individual quota reached. Resets in 3h1m42s.",
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED", "metadata": {"quotaResetDelay": "3h1m42.887839366s"}},
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "10902.887839366s"}
+				]
+			}
+		}`))
+	}))
+	defer primary.Close()
+
+	var fallbackRequests int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackRequests++
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"unexpected"}]}}]}}`))
+	}))
+	defer fallback.Close()
+
+	originalFallbackOrder := antigravityBaseURLFallbackOrder
+	antigravityBaseURLFallbackOrder = func(*cliproxyauth.Auth) []string {
+		return []string{primary.URL, fallback.URL}
+	}
+	t.Cleanup(func() { antigravityBaseURLFallbackOrder = originalFallbackOrder })
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 3})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-quota-no-fallback",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want quota error")
+	}
+	if primaryRequests != 1 {
+		t.Fatalf("primary requests = %d, want 1", primaryRequests)
+	}
+	if fallbackRequests != 0 {
+		t.Fatalf("fallback requests = %d, want 0", fallbackRequests)
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil || *retryable.RetryAfter() < 3*time.Hour {
+		t.Fatalf("RetryAfter() = %v, want parsed quota reset", retryable)
+	}
+}
+
 func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
