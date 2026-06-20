@@ -311,36 +311,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
+			for _, key := range modelStateLookupKeys(auth, model) {
+				state, ok := auth.ModelStates[key]
+				if !ok || state == nil {
+					continue
 				}
-			}
-			if ok && state != nil {
-				if state.Status == StatusDisabled {
-					return true, blockReasonDisabled, time.Time{}
+				if blocked, reason, next := modelStateBlockReason(state, now); blocked {
+					return true, reason, next
 				}
-				if state.Unavailable {
-					if state.NextRetryAfter.IsZero() {
-						return false, blockReasonNone, time.Time{}
-					}
-					if state.NextRetryAfter.After(now) {
-						next := state.NextRetryAfter
-						if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
-							next = state.Quota.NextRecoverAt
-						}
-						if next.Before(now) {
-							next = now
-						}
-						if state.Quota.Exceeded {
-							return true, blockReasonCooldown, next
-						}
-						return true, blockReasonOther, next
-					}
-				}
-				return false, blockReasonNone, time.Time{}
 			}
 		}
 		return false, blockReasonNone, time.Time{}
@@ -359,6 +337,67 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+func modelStateLookupKeys(auth *Auth, model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	keys := []string{model}
+	baseModel := canonicalModelKey(model)
+	if baseModel != "" && baseModel != model {
+		keys = append(keys, baseModel)
+	}
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		bucket := AntigravityQuotaBucketForModel(model)
+		if bucket != "" {
+			keys = append(keys, bucket)
+		}
+	}
+	seen := make(map[string]struct{}, len(keys))
+	out := keys[:0]
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func modelStateBlockReason(state *ModelState, now time.Time) (bool, blockReason, time.Time) {
+	if state == nil {
+		return false, blockReasonNone, time.Time{}
+	}
+	if state.Status == StatusDisabled {
+		return true, blockReasonDisabled, time.Time{}
+	}
+	if !state.Unavailable {
+		return false, blockReasonNone, time.Time{}
+	}
+	if state.NextRetryAfter.IsZero() {
+		return false, blockReasonNone, time.Time{}
+	}
+	if !state.NextRetryAfter.After(now) {
+		return false, blockReasonNone, time.Time{}
+	}
+	next := state.NextRetryAfter
+	if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+		next = state.Quota.NextRecoverAt
+	}
+	if next.Before(now) {
+		next = now
+	}
+	if state.Quota.Exceeded {
+		return true, blockReasonCooldown, next
+	}
+	return true, blockReasonOther, next
 }
 
 // sessionPattern matches Claude Code user_id format:

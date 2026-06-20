@@ -83,10 +83,11 @@ const (
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
 	// burn CPU at idle.
-	refreshIneffectiveBackoff = 30 * time.Second
-	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
-	transientErrorCooldown    = time.Minute
+	refreshIneffectiveBackoff          = 30 * time.Second
+	quotaBackoffBase                   = time.Second
+	quotaBackoffMax                    = 30 * time.Minute
+	transientErrorCooldown             = time.Minute
+	antigravityCooldownRefreshInterval = 10 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2076,8 +2077,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	now := time.Now()
 	clearedCooldown := false
+	if clearAntigravityCooldownBucketsFromMetadata(auth, now) {
+		clearedCooldown = true
+	}
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
-		clearedCooldown = clearCooldownStateForAuth(auth, now)
+		clearedCooldown = clearCooldownStateForAuth(auth, now) || clearedCooldown
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
@@ -3565,6 +3569,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+					resetAntigravityBucketStateOnSuccess(auth, result.Model, now)
+				}
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -3668,14 +3675,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 502, 504:
+						case 408, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								next := now.Add(5 * time.Second)
 								state.NextRetryAfter = next
 							}
-						case 500, 503:
+						case 500, 502, 503:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -3684,6 +3691,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
+					}
+					if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") && statusCode == http.StatusTooManyRequests {
+						mirrorAntigravityBucketCooldown(auth, result.Model, state, now)
 					}
 
 					auth.Status = StatusError
@@ -3760,6 +3770,102 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	state.Quota = QuotaState{}
 	state.UpdatedAt = now
+}
+
+func mirrorAntigravityBucketCooldown(auth *Auth, model string, source *ModelState, now time.Time) {
+	if auth == nil || source == nil {
+		return
+	}
+	for _, key := range antigravityModelKeysForCooldown(model) {
+		if key == strings.TrimSpace(canonicalModelKey(model)) {
+			continue
+		}
+		state := ensureModelState(auth, key)
+		if state == nil {
+			continue
+		}
+		state.Status = source.Status
+		state.StatusMessage = source.StatusMessage
+		state.Unavailable = source.Unavailable
+		state.NextRetryAfter = source.NextRetryAfter
+		state.LastError = cloneError(source.LastError)
+		state.Quota = source.Quota
+		state.UpdatedAt = now
+	}
+}
+
+func resetAntigravityBucketStateOnSuccess(auth *Auth, model string, now time.Time) {
+	if auth == nil {
+		return
+	}
+	for _, key := range antigravityModelKeysForCooldown(model) {
+		if key == strings.TrimSpace(canonicalModelKey(model)) {
+			continue
+		}
+		if state := ensureModelState(auth, key); state != nil {
+			resetModelState(state, now)
+		}
+	}
+}
+
+func clearAntigravityCooldownBucketsFromMetadata(auth *Auth, now time.Time) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		return false
+	}
+	buckets := metadataStringSlice(auth.Metadata, AntigravityCooldownClearMetadata)
+	if len(buckets) == 0 {
+		return false
+	}
+	if auth.Metadata != nil {
+		delete(auth.Metadata, AntigravityCooldownClearMetadata)
+	}
+	changed := false
+	for _, bucket := range buckets {
+		if clearAntigravityCooldownBucket(auth, bucket, now) {
+			changed = true
+		}
+	}
+	if changed {
+		updateAggregatedAvailability(auth, now)
+	}
+	return changed
+}
+
+func clearAntigravityCooldownBucket(auth *Auth, bucket string, now time.Time) bool {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return false
+	}
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return false
+	}
+	changed := false
+	for model, state := range auth.ModelStates {
+		if state == nil || !antigravityBucketMatchesModel(bucket, model) {
+			continue
+		}
+		if !modelStateIsClean(state) {
+			resetModelState(state, now)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func hasActiveAntigravityCooldown(auth *Auth, now time.Time) bool {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return false
+	}
+	for model, state := range auth.ModelStates {
+		if !antigravityBucketMatchesModel(AntigravityClaudeGPTQuotaBucket, model) && !antigravityBucketMatchesModel(AntigravityGeminiQuotaBucket, model) {
+			continue
+		}
+		blocked, reason, _ := modelStateBlockReason(state, now)
+		if blocked && reason == blockReasonCooldown {
+			return true
+		}
+	}
+	return false
 }
 
 func modelStateIsClean(state *ModelState) bool {
@@ -5401,6 +5507,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 			return true
 		}
 		return now.Sub(lastRefresh) >= interval
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") && hasActiveAntigravityCooldown(a, now) {
+		return lastRefresh.IsZero() || now.Sub(lastRefresh) >= antigravityCooldownRefreshInterval
 	}
 
 	provider := strings.ToLower(a.Provider)
