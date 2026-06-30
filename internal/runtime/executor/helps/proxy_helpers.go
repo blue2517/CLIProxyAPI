@@ -50,9 +50,14 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		log.Debug("global proxy bypassed: health monitor reports proxy disabled")
 	}
 
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
+
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport := buildProxyTransport(proxyURL, connectTimeout)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
@@ -74,11 +79,12 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 //
 // Parameters:
 //   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
+//   - connectTimeout: Bounds the connection-establishment phase only; <= 0 disables the bound
 //
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+func buildProxyTransport(proxyURL string, connectTimeout time.Duration) *http.Transport {
+	transport, _, errBuild := proxyutil.BuildHTTPTransportWithTimeout(proxyURL, connectTimeout)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil

@@ -4,10 +4,32 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import "time"
+
+// DefaultProxyConnectTimeout bounds the connection-establishment phase (dial +
+// TLS handshake + HTTP CONNECT) when a proxy is configured. It does not apply
+// after the connection is established.
+const DefaultProxyConnectTimeout = 10 * time.Second
+
+// ProxyConnectTimeout resolves the configured proxy connection-establishment
+// timeout, falling back to DefaultProxyConnectTimeout when unset (<= 0).
+func (cfg *SDKConfig) ProxyConnectTimeout() time.Duration {
+	if cfg == nil || cfg.ProxyConnectTimeoutSeconds <= 0 {
+		return DefaultProxyConnectTimeout
+	}
+	return time.Duration(cfg.ProxyConnectTimeoutSeconds) * time.Second
+}
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// ProxyConnectTimeoutSeconds caps how long a proxied connection may spend on
+	// dialing + TLS handshake (and the HTTP CONNECT exchange) before failing fast.
+	// 0 uses the default (DefaultProxyConnectTimeout). Only the connection-establishment
+	// phase is bounded; once connected there is no timeout, per project conventions.
+	ProxyConnectTimeoutSeconds int `yaml:"proxy-connect-timeout-seconds,omitempty" json:"proxy-connect-timeout-seconds,omitempty"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//

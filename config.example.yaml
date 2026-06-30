@@ -99,6 +99,11 @@ redis-usage-queue-retention-seconds: 60
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# Connection-establishment timeout (in seconds) for proxied requests. Bounds only the
+# dial + TLS handshake + HTTP CONNECT phase so an unresponsive proxy fails fast instead
+# of hanging; it never applies once the connection is established. 0 uses the default (10s).
+proxy-connect-timeout-seconds: 0
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 

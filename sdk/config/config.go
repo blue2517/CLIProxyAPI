@@ -34,6 +34,9 @@ const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
 )
 
+// DefaultProxyConnectTimeout re-exports the default proxy connection-establishment timeout.
+const DefaultProxyConnectTimeout = internalconfig.DefaultProxyConnectTimeout
+
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
