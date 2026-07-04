@@ -378,7 +378,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					partJSON := []byte(`{}`)
 					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)
 					clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
-					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+					if prevRole == role {
+						lastIdx := gjson.GetBytes(contentsJSON, "#").Int() - 1
+						contentsJSON, _ = sjson.SetRawBytes(contentsJSON, fmt.Sprintf("%d.parts.-1", lastIdx), partJSON)
+					} else {
+						contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+						prevRole = role
+					}
 					hasContents = true
 				}
 				continue
