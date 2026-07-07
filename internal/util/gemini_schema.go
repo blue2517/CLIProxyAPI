@@ -604,6 +604,22 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 	return jsonStr
 }
 
+// UppercaseSchemaTypes converts all "type" field values in a JSON schema to
+// uppercase (e.g., "object" → "OBJECT") for Antigravity API compatibility.
+func UppercaseSchemaTypes(jsonStr string) string {
+	var paths []string
+	Walk(gjson.Parse(jsonStr), "", "type", &paths)
+	for _, p := range paths {
+		val := gjson.Get(jsonStr, p).String()
+		upper := strings.ToUpper(val)
+		if upper != val {
+			updated, _ := sjson.Set(jsonStr, p, upper)
+			jsonStr = updated
+		}
+	}
+	return jsonStr
+}
+
 // --- Helpers ---
 
 func findPaths(jsonStr, field string) []string {

@@ -1179,17 +1179,37 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 		t.Error("Tools should exist in output")
 	}
 
-	funcDecl := gjson.Get(outputStr, "request.tools.0.functionDeclarations.0")
+	// Each tool should be in its own functionDeclarations wrapper
+	toolsArr := tools.Array()
+	if len(toolsArr) != 1 {
+		t.Fatalf("Expected 1 tool wrapper, got %d", len(toolsArr))
+	}
+	funcDecls := toolsArr[0].Get("functionDeclarations").Array()
+	if len(funcDecls) != 1 {
+		t.Fatalf("Expected 1 function declaration per wrapper, got %d", len(funcDecls))
+	}
+
+	funcDecl := funcDecls[0]
 	if funcDecl.Get("name").String() != "test_tool" {
 		t.Errorf("Expected tool name 'test_tool', got '%s'", funcDecl.Get("name").String())
 	}
 
 	// Check input_schema renamed to parametersJsonSchema
-	if funcDecl.Get("parametersJsonSchema").Exists() {
-		t.Log("parametersJsonSchema exists (expected)")
+	if !funcDecl.Get("parametersJsonSchema").Exists() {
+		t.Error("parametersJsonSchema should exist")
 	}
 	if funcDecl.Get("input_schema").Exists() {
 		t.Error("input_schema should be removed")
+	}
+
+	// Check type values are uppercased
+	schemaType := funcDecl.Get("parametersJsonSchema.type").String()
+	if schemaType != "OBJECT" {
+		t.Errorf("Expected schema type 'OBJECT', got '%s'", schemaType)
+	}
+	nameType := funcDecl.Get("parametersJsonSchema.properties.name.type").String()
+	if nameType != "STRING" {
+		t.Errorf("Expected property type 'STRING', got '%s'", nameType)
 	}
 }
 
@@ -2836,5 +2856,79 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 	if !found {
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MultipleToolsGetIndividualWrappers(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"tools": [
+			{
+				"name": "Grep",
+				"description": "Search files",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"pattern": {"type": "string"},
+						"path": {"type": "string"}
+					},
+					"required": ["pattern"]
+				}
+			},
+			{
+				"name": "Bash",
+				"description": "Run commands",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"command": {"type": "string"},
+						"description": {"type": "string"}
+					},
+					"required": ["command"]
+				}
+			},
+			{
+				"name": "Read",
+				"description": "Read a file",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"file_path": {"type": "string"}
+					},
+					"required": ["file_path"]
+				}
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	tools := gjson.Get(outputStr, "request.tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("Expected 3 tool wrappers (one per tool), got %d", len(tools))
+	}
+
+	expectedNames := []string{"Grep", "Bash", "Read"}
+	for i, wrapper := range tools {
+		decls := wrapper.Get("functionDeclarations").Array()
+		if len(decls) != 1 {
+			t.Fatalf("Tool wrapper %d: expected 1 declaration, got %d", i, len(decls))
+		}
+		if got := decls[0].Get("name").String(); got != expectedNames[i] {
+			t.Errorf("Tool wrapper %d: expected name '%s', got '%s'", i, expectedNames[i], got)
+		}
+		// Verify type uppercasing in each tool's schema
+		schemaType := decls[0].Get("parametersJsonSchema.type").String()
+		if schemaType != "OBJECT" {
+			t.Errorf("Tool %s: expected schema type 'OBJECT', got '%s'", expectedNames[i], schemaType)
+		}
+	}
+
+	// Verify nested property types are also uppercased
+	grepPatternType := tools[0].Get("functionDeclarations.0.parametersJsonSchema.properties.pattern.type").String()
+	if grepPatternType != "STRING" {
+		t.Errorf("Grep pattern type: expected 'STRING', got '%s'", grepPatternType)
 	}
 }

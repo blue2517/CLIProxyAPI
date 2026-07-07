@@ -687,7 +687,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		functionToolNode := []byte(`{"functionDeclarations":[]}`)
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
@@ -698,6 +697,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
 				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
+				inputSchema = util.UppercaseSchemaTypes(inputSchema)
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
 				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
 				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
@@ -707,13 +707,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 					tool, _ = sjson.DeleteBytes(tool, toolKey)
 				}
-				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", tool)
+				toolWrapper := []byte(`{"functionDeclarations":[]}`)
+				toolWrapper, _ = sjson.SetRawBytes(toolWrapper, "functionDeclarations.-1", tool)
+				if toolsJSON == nil {
+					toolsJSON = []byte(`[]`)
+				}
+				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", toolWrapper)
 				toolDeclCount++
 			}
-		}
-		if toolDeclCount > 0 {
-			toolsJSON = []byte(`[]`)
-			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
 		}
 	}
 
