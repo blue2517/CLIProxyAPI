@@ -1066,6 +1066,35 @@ func TestRemoveExtensionFields(t *testing.T) {
 	}
 }
 
+func TestUppercaseSchemaTypes_SkipsPropertyNamedType(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"pattern": {"type": "string", "description": "regex pattern"},
+			"type": {"type": "string", "description": "File type to search (rg --type)"}
+		}
+	}`
+
+	result := UppercaseSchemaTypes(input)
+
+	topType := gjson.Get(result, "type").String()
+	if topType != "OBJECT" {
+		t.Errorf("top-level type should be OBJECT, got %s", topType)
+	}
+	patternType := gjson.Get(result, "properties.pattern.type").String()
+	if patternType != "STRING" {
+		t.Errorf("pattern.type should be STRING, got %s", patternType)
+	}
+	typeType := gjson.Get(result, "properties.type.type").String()
+	if typeType != "STRING" {
+		t.Errorf("properties.type.type should be STRING, got %s", typeType)
+	}
+	typeDesc := gjson.Get(result, "properties.type.description").String()
+	if typeDesc != "File type to search (rg --type)" {
+		t.Errorf("properties.type.description should be preserved, got %s", typeDesc)
+	}
+}
+
 // uniqueItems should be stripped and moved to description hint (#2123).
 func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
 	input := `{

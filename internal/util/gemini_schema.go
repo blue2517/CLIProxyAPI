@@ -610,9 +610,12 @@ func UppercaseSchemaTypes(jsonStr string) string {
 	var paths []string
 	Walk(gjson.Parse(jsonStr), "", "type", &paths)
 	for _, p := range paths {
-		val := gjson.Get(jsonStr, p).String()
-		upper := strings.ToUpper(val)
-		if upper != val {
+		res := gjson.Get(jsonStr, p)
+		if res.Type != gjson.String {
+			continue
+		}
+		upper := strings.ToUpper(res.String())
+		if upper != res.String() {
 			updated, _ := sjson.Set(jsonStr, p, upper)
 			jsonStr = updated
 		}
