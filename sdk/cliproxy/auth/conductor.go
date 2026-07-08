@@ -3734,7 +3734,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								if result.RetryAfter != nil {
+								if result.RetryAfter != nil && *result.RetryAfter > 0 {
 									next = now.Add(*result.RetryAfter)
 								} else {
 									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)

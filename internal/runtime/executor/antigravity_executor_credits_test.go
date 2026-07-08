@@ -261,6 +261,35 @@ func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	}
 }
 
+func TestParseRetryDelay_UsesQuotaResetTimestampWhenRetryInfoIsZero(t *testing.T) {
+	resetAt := time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	body := []byte(`{
+		"error": {
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+					"reason": "RATE_LIMIT_EXCEEDED",
+					"metadata": {
+						"quotaResetTimeStamp": "` + resetAt + `"
+					}
+				},
+				{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0s"}
+			]
+		}
+	}`)
+	retryAfter, err := helps.ParseRetryDelay(body)
+	if err != nil {
+		t.Fatalf("helps.ParseRetryDelay() error = %v", err)
+	}
+	if retryAfter == nil {
+		t.Fatal("helps.ParseRetryDelay() returned nil")
+	}
+	if *retryAfter <= time.Minute || *retryAfter > 3*time.Minute {
+		t.Fatalf("helps.ParseRetryDelay() = %v, want timestamp-derived delay", *retryAfter)
+	}
+}
+
 func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)

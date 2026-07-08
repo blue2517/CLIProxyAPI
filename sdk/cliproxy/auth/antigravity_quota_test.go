@@ -36,6 +36,36 @@ func TestAntigravityQuotaCooldownBucketsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestAntigravityQuotaZeroRetryAfterUsesBackoffCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "ag-zero-retry-after", Provider: "antigravity"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	zeroRetryAfter := time.Duration(0)
+	m.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      "gemini-3-flash",
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+		RetryAfter: &zeroRetryAfter,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to be present")
+	}
+	blocked, reason, next := isAuthBlockedForModel(updated, "gemini-2.5-flash", time.Now())
+	if !blocked || reason != blockReasonCooldown {
+		t.Fatalf("gemini bucket blocked=%v reason=%v, want cooldown", blocked, reason)
+	}
+	if !next.After(time.Now()) {
+		t.Fatalf("next retry = %v, want future time", next)
+	}
+}
+
 func TestAntigravityQuotaRefreshClearsMatchingBucket(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	auth := &Auth{ID: "ag-refresh-clear", Provider: "antigravity"}

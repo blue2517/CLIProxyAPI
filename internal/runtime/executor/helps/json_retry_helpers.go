@@ -39,20 +39,21 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse duration")
 			}
-			return &duration, nil
+			if duration > 0 {
+				return &duration, nil
+			}
 		}
 
+		now := time.Now()
 		for _, detail := range details.Array() {
 			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
 				continue
 			}
-			quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
-			if quotaResetDelay == "" {
-				continue
+			if duration := parseRetryDelayMetadataDuration(detail); duration != nil {
+				return duration, nil
 			}
-			duration, err := time.ParseDuration(quotaResetDelay)
-			if err == nil {
-				return &duration, nil
+			if duration := parseRetryDelayMetadataTimestamp(detail, now); duration != nil {
+				return duration, nil
 			}
 		}
 	}
@@ -62,7 +63,7 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
 			seconds, err := strconv.Atoi(matches[1])
-			if err == nil {
+			if err == nil && seconds > 0 {
 				duration := time.Duration(seconds) * time.Second
 				return &duration, nil
 			}
@@ -77,4 +78,35 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	}
 
 	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+func parseRetryDelayMetadataDuration(detail gjson.Result) *time.Duration {
+	quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
+	if quotaResetDelay == "" {
+		return nil
+	}
+	duration, err := time.ParseDuration(quotaResetDelay)
+	if err != nil || duration <= 0 {
+		return nil
+	}
+	return &duration
+}
+
+func parseRetryDelayMetadataTimestamp(detail gjson.Result, now time.Time) *time.Duration {
+	quotaResetTimestamp := detail.Get("metadata.quotaResetTimeStamp").String()
+	if quotaResetTimestamp == "" {
+		quotaResetTimestamp = detail.Get("metadata.quotaResetTimestamp").String()
+	}
+	if quotaResetTimestamp == "" {
+		return nil
+	}
+	resetAt, err := time.Parse(time.RFC3339Nano, quotaResetTimestamp)
+	if err != nil {
+		return nil
+	}
+	duration := resetAt.Sub(now)
+	if duration <= 0 {
+		return nil
+	}
+	return &duration
 }
