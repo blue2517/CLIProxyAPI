@@ -710,6 +710,71 @@ func TestCodexExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult
 	}
 }
 
+func TestCodexExecutorReasoningReplayCacheUsesExistingToolCallAsReplayAnchor(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(15)
+	scope := codexReasoningReplayScope{
+		modelName:  "gpt-5.4",
+		sessionKey: "claude:session-existing-tool",
+	}
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_existing","name":"lookup","arguments":"{}"}`+
+		`]}}`))
+
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"function_call","call_id":"call_existing","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_existing","output":"sunny"}` +
+		`]}`)
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-existing-tool\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]
+		}`),
+	}
+
+	updated, replayScope := applyCodexReasoningReplayCache(
+		context.Background(),
+		sdktranslator.FromString("claude"),
+		req,
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		body,
+	)
+	if replayScope != scope {
+		t.Fatalf("replay scope = %#v, want %#v", replayScope, scope)
+	}
+	if got := gjson.GetBytes(updated, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user; body=%s", got, string(updated))
+	}
+	if got := gjson.GetBytes(updated, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want reasoning before existing tool call; body=%s", got, string(updated))
+	}
+	if got := gjson.GetBytes(updated, "input.1.encrypted_content").String(); got != encryptedContent {
+		t.Fatalf("input.1.encrypted_content = %q, want %q; body=%s", got, encryptedContent, string(updated))
+	}
+	if got := gjson.GetBytes(updated, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want existing function_call; body=%s", got, string(updated))
+	}
+	if got := gjson.GetBytes(updated, "input.3.type").String(); got != "function_call_output" {
+		t.Fatalf("input.3.type = %q, want function_call_output; body=%s", got, string(updated))
+	}
+
+	functionCallCount := 0
+	for _, item := range gjson.GetBytes(updated, "input").Array() {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call_existing" {
+			functionCallCount++
+		}
+	}
+	if functionCallCount != 1 {
+		t.Fatalf("function_call count = %d, want 1 without a duplicate replay item; body=%s", functionCallCount, string(updated))
+	}
+}
+
 func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)

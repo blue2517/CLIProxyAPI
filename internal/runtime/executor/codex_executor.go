@@ -430,7 +430,6 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 	}
 
 	hasInputReasoning := codexInputHasValidReasoningEncryptedContent(body)
-	existingCalls := make(map[string]bool)
 	existingOutputs := make(map[string]bool)
 	for _, inputItem := range input.Array() {
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
@@ -442,12 +441,10 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 				}
 			}
 		}
-		for _, key := range codexReplayToolCallKeys(inputItem) {
-			existingCalls[key] = true
-		}
 	}
 
 	filtered := make([][]byte, 0, len(items))
+	replayCalls := make(map[string]bool)
 	for _, item := range items {
 		itemResult := gjson.ParseBytes(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
@@ -457,7 +454,7 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 			}
 		case "function_call", "custom_tool_call":
 			keys := codexReplayToolCallKeys(itemResult)
-			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
+			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(replayCalls, keys) {
 				continue
 			}
 			// Only inject if there is a matching output in the request
@@ -475,7 +472,7 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 				continue
 			}
 			for _, key := range keys {
-				existingCalls[key] = true
+				replayCalls[key] = true
 			}
 		default:
 			continue
@@ -493,6 +490,10 @@ func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte,
 	inputItems := input.Array()
 	insertIndex := codexReasoningReplayInsertIndex(inputItems, replayItems)
 	replayItems = codexAlignReasoningReplayToolCallIDs(inputItems, replayItems)
+	replayItems = codexDropReasoningReplayToolCallsAlreadyInInput(inputItems, replayItems)
+	if len(replayItems) == 0 {
+		return body, false
+	}
 	items := make([]string, 0, len(inputItems)+len(replayItems))
 	for i, inputItem := range inputItems {
 		if i == insertIndex {
@@ -514,6 +515,33 @@ func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte,
 	return updated, true
 }
 
+// codexDropReasoningReplayToolCallsAlreadyInInput leaves cached reasoning in
+// place while avoiding duplicate tool calls that Claude has already replayed
+// in its conversation history. The original calls still anchor the reasoning
+// at the correct causal position.
+func codexDropReasoningReplayToolCallsAlreadyInInput(inputItems []gjson.Result, replayItems [][]byte) [][]byte {
+	existingCalls := make(map[string]bool)
+	for _, inputItem := range inputItems {
+		for _, key := range codexReplayToolCallKeys(inputItem) {
+			existingCalls[key] = true
+		}
+	}
+	if len(existingCalls) == 0 {
+		return replayItems
+	}
+
+	filtered := make([][]byte, 0, len(replayItems))
+	for _, replayItem := range replayItems {
+		itemResult := gjson.ParseBytes(replayItem)
+		itemType := strings.TrimSpace(itemResult.Get("type").String())
+		if (itemType == "function_call" || itemType == "custom_tool_call") && codexReplayAnyToolCallKeyExists(existingCalls, codexReplayToolCallKeys(itemResult)) {
+			continue
+		}
+		filtered = append(filtered, replayItem)
+	}
+	return filtered
+}
+
 func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]byte) int {
 	replayCallIDs := make(map[string]bool)
 	for _, replayItem := range replayItems {
@@ -527,6 +555,16 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 		}
 	}
 	if len(replayCallIDs) > 0 {
+		for index, inputItem := range inputItems {
+			itemType := strings.TrimSpace(inputItem.Get("type").String())
+			if itemType != "function_call" && itemType != "custom_tool_call" {
+				continue
+			}
+			callID := strings.TrimSpace(inputItem.Get("call_id").String())
+			if callID != "" && replayCallIDs[callID] {
+				return index
+			}
+		}
 		for index, inputItem := range inputItems {
 			itemType := strings.TrimSpace(inputItem.Get("type").String())
 			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
