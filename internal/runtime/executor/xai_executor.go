@@ -1089,23 +1089,66 @@ func normalizeXAITools(body []byte) []byte {
 // normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
 // when tools are absent or empty (including after normalizeXAITools filtering).
 // xAI rejects payloads that include tool_choice without any tools defined.
+// When tools are present, it also rewrites OpenAI/Codex-style forced built-in
+// tool choices such as {"type":"web_search"} to the string "required".
+// xAI's ModelToolChoice untagged enum accepts auto/none/required and function
+// selection, but not server-side built-in tool type objects.
 // Existence checks avoid unnecessary sjson parse/copy passes.
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
-	if hasTools {
+	if !hasTools {
+		if tools.Exists() {
+			body, _ = sjson.DeleteBytes(body, "tools")
+		}
+		if gjson.GetBytes(body, "tool_choice").Exists() {
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		}
+		if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
+			body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+		}
 		return body
 	}
-	if tools.Exists() {
-		body, _ = sjson.DeleteBytes(body, "tools")
+	return normalizeXAIToolChoiceShape(body)
+}
+
+// normalizeXAIToolChoiceShape rewrites tool_choice values that xAI cannot
+// deserialize. Claude→Codex translation maps a forced native web_search tool
+// choice to {"type":"web_search"}; OpenAI accepts that, xAI returns 422
+// ModelToolChoice. Map any non-function built-in tool type object to
+// "required" so the model must still use a tool (typically the only built-in
+// tool present).
+func normalizeXAIToolChoiceShape(body []byte) []byte {
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.Exists() {
+		return body
 	}
-	if gjson.GetBytes(body, "tool_choice").Exists() {
-		body, _ = sjson.DeleteBytes(body, "tool_choice")
+	// String modes ("auto"/"none"/"required") are already valid for xAI.
+	if toolChoice.Type == gjson.String {
+		return body
 	}
-	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
-		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	if toolChoice.Type != gjson.JSON || !toolChoice.IsObject() {
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "auto")
+		if errSet != nil {
+			return body
+		}
+		return updated
 	}
-	return body
+
+	switch toolChoice.Get("type").String() {
+	case "function", "auto", "none", "required", "allowed_tools":
+		// Keep OpenAI-compatible object/function selections unchanged.
+		return body
+	case "":
+		return body
+	default:
+		// Built-in server tools: web_search, x_search, code_interpreter, etc.
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
 }
 
 func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
