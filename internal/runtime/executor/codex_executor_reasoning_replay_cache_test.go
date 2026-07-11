@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -156,6 +157,68 @@ func TestCodexExecutorReasoningReplaySessionKeyUsesClaudeCodeJSONSessionID(t *te
 	got := codexReasoningReplaySessionKey(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from}, body)
 	if got != "claude:session-json-1" {
 		t.Fatalf("codexReasoningReplaySessionKey() = %q, want claude:session-json-1", got)
+	}
+}
+
+func TestCodexExecutorReasoningReplaySessionKeySeparatesClaudeCodeAgents(t *testing.T) {
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"session_id\":\"shared-session\"}"}}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[]}`)
+	firstOpts := cliproxyexecutor.Options{
+		SourceFormat: from,
+		Headers:      http.Header{helps.ClaudeCodeAgentHeader: []string{"agent-a"}},
+	}
+	secondOpts := cliproxyexecutor.Options{
+		SourceFormat: from,
+		Headers:      http.Header{helps.ClaudeCodeAgentHeader: []string{"agent-b"}},
+	}
+
+	first := codexReasoningReplaySessionKey(context.Background(), from, req, firstOpts, body)
+	second := codexReasoningReplaySessionKey(context.Background(), from, req, secondOpts, body)
+	if first != "claude:shared-session:agent:agent-a" {
+		t.Fatalf("first replay session key = %q", first)
+	}
+	if second != "claude:shared-session:agent:agent-b" {
+		t.Fatalf("second replay session key = %q", second)
+	}
+	if first == second {
+		t.Fatalf("agent-specific replay session keys must differ")
+	}
+}
+
+func TestCodexExecutorReasoningReplayCacheDoesNotLeakAcrossClaudeCodeAgents(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"session_id\":\"shared-session\"}"}}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	firstOpts := cliproxyexecutor.Options{
+		SourceFormat: from,
+		Headers:      http.Header{helps.ClaudeCodeAgentHeader: []string{"agent-a"}},
+	}
+	secondOpts := cliproxyexecutor.Options{
+		SourceFormat: from,
+		Headers:      http.Header{helps.ClaudeCodeAgentHeader: []string{"agent-b"}},
+	}
+	firstScope := codexReasoningReplayScopeFromRequest(context.Background(), from, req, firstOpts, body)
+	if !firstScope.valid() {
+		t.Fatalf("first replay scope is invalid: %#v", firstScope)
+	}
+	cacheCodexReasoningReplayFromCompleted(firstScope, []byte(`{"response":{"output":[{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+validCodexReasoningEncryptedContentForTestSeed(13)+`"}]}}`))
+
+	updated, secondScope := applyCodexReasoningReplayCache(context.Background(), from, req, secondOpts, body)
+	if secondScope == firstScope {
+		t.Fatalf("different agents must use different replay scopes: %#v", secondScope)
+	}
+	if got := gjson.GetBytes(updated, "input.0.type").String(); got != "message" {
+		t.Fatalf("agent B received agent A replay item: input.0.type = %q; body=%s", got, string(updated))
 	}
 }
 

@@ -294,11 +294,11 @@ func sourceFormatEqual(from, want sdktranslator.Format) bool {
 }
 
 func codexClaudeCodeReplaySessionKey(ctx context.Context, payload []byte, headers http.Header) string {
-	sessionID := helps.ExtractClaudeCodeSessionID(ctx, payload, headers)
-	if sessionID == "" {
+	conversationKey := helps.ClaudeCodeConversationKey(ctx, payload, headers)
+	if conversationKey == "" {
 		return ""
 	}
-	return "claude:" + sessionID
+	return "claude:" + conversationKey
 }
 
 func codexReasoningReplaySessionKey(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) string {
