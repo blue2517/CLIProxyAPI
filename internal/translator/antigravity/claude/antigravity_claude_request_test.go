@@ -152,26 +152,26 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
 	}
 
-	// Consecutive user-role messages (original user + system→user conversions) are merged.
 	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("Expected 1 merged content entry (user + system→user), got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	if len(contents) != 3 {
+		t.Fatalf("Expected the user and message-level system turns to remain separate, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
 	}
-	if got := contents[0].Get("role").String(); got != "user" {
-		t.Fatalf("Expected merged content role user, got %q", got)
+	wantTexts := []string{
+		"Hello",
+		"<system-reminder>\nString mid-conversation rule\n</system-reminder>",
+		"<system-reminder>\nArray mid-conversation rule\n</system-reminder>",
 	}
-	mergedParts := contents[0].Get("parts").Array()
-	if len(mergedParts) != 3 {
-		t.Fatalf("Expected 3 parts in merged content, got %d", len(mergedParts))
-	}
-	if got := mergedParts[0].Get("text").String(); got != "Hello" {
-		t.Fatalf("Unexpected first part text: %q", got)
-	}
-	if got := mergedParts[1].Get("text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
-		t.Fatalf("Unexpected second part text (from string system): %q", got)
-	}
-	if got := mergedParts[2].Get("text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
-		t.Fatalf("Unexpected third part text (from array system): %q", got)
+	for i, content := range contents {
+		if got := content.Get("role").String(); got != "user" {
+			t.Fatalf("Expected content %d role user, got %q", i, got)
+		}
+		parts := content.Get("parts").Array()
+		if len(parts) != 1 {
+			t.Fatalf("Expected content %d to contain one part, got %d", i, len(parts))
+		}
+		if got := parts[0].Get("text").String(); got != wantTexts[i] {
+			t.Fatalf("Unexpected content %d text: %q", i, got)
+		}
 	}
 
 	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
@@ -180,6 +180,35 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 	}
 	if got := parts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesConsecutiveMessageBoundaries(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"messages": [
+			{"role": "user", "content": "First user turn"},
+			{"role": "user", "content": "Second user turn"},
+			{"role": "assistant", "content": "First assistant turn"},
+			{"role": "assistant", "content": "Second assistant turn"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 4 {
+		t.Fatalf("Expected one target content per source message, got %d: %s", len(contents), output)
+	}
+
+	wantRoles := []string{"user", "user", "model", "model"}
+	wantTexts := []string{"First user turn", "Second user turn", "First assistant turn", "Second assistant turn"}
+	for i, content := range contents {
+		if got := content.Get("role").String(); got != wantRoles[i] {
+			t.Fatalf("Content %d role = %q, want %q", i, got, wantRoles[i])
+		}
+		if got := content.Get("parts.0.text").String(); got != wantTexts[i] {
+			t.Fatalf("Content %d text = %q, want %q", i, got, wantTexts[i])
+		}
 	}
 }
 
