@@ -222,6 +222,32 @@ func TestCodexExecutorReasoningReplayCacheDoesNotLeakAcrossClaudeCodeAgents(t *t
 	}
 }
 
+func TestCodexExecutorReasoningReplayCacheSkipsExplicitlyDisabledClaudeThinking(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"session_id\":\"disabled-thinking-session\"}"},
+			"thinking":{"type":"disabled"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]
+		}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"stable instructions"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:disabled-thinking-session", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+validCodexReasoningEncryptedContentForTestSeed(14)+`"}`))
+
+	updated, scope := applyCodexReasoningReplayCache(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from}, body)
+	if scope.valid() {
+		t.Fatalf("disabled Claude thinking unexpectedly created replay scope: %#v", scope)
+	}
+	if string(updated) != string(body) {
+		t.Fatalf("disabled Claude thinking injected replay data: %s", string(updated))
+	}
+}
+
 func TestCodexExecutorReasoningReplaySessionKeyRejectsBareClaudeUserID(t *testing.T) {
 	from := sdktranslator.FromString("claude")
 	req := cliproxyexecutor.Request{

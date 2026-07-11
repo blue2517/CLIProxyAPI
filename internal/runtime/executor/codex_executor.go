@@ -276,7 +276,7 @@ func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktransla
 }
 
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
-	if !codexReasoningReplayEnabledForSource(from) {
+	if !codexReasoningReplayEnabledForRequest(from, req.Model, req.Payload) {
 		return codexReasoningReplayScope{}
 	}
 	return codexReasoningReplayScope{
@@ -285,8 +285,13 @@ func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslato
 	}
 }
 
-func codexReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
-	return sourceFormatEqual(from, sdktranslator.FormatClaude)
+func codexReasoningReplayEnabledForRequest(from sdktranslator.Format, model string, payload []byte) bool {
+	if !sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		return false
+	}
+	// Replaying encrypted reasoning into a request that explicitly disabled
+	// thinking adds volatile input without a matching Claude reasoning turn.
+	return thinking.ExtractReasoningEffort(payload, from.String(), model) != string(thinking.LevelNone)
 }
 
 func sourceFormatEqual(from, want sdktranslator.Format) bool {
