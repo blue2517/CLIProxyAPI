@@ -864,6 +864,65 @@ func TestCodexExecutorReasoningReplayCacheUsesExistingToolCallAsReplayAnchor(t *
 	}
 }
 
+func TestCodexExecutorReasoningReplayCachePreservesEarlierToolTurnAnchors(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	firstEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(21)
+	secondEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(22)
+	scope := codexReasoningReplayScope{
+		modelName:  "gpt-5.4",
+		sessionKey: "claude:session-multiple-tool-turns",
+	}
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+firstEncryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"}`+
+		`]}}`))
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+secondEncryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"}`+
+		`]}}`))
+
+	cachedItems, ok := internalcache.GetCodexReasoningReplayItems(scope.modelName, scope.sessionKey)
+	if !ok {
+		t.Fatal("expected accumulated reasoning replay cache entry")
+	}
+	if got := len(cachedItems); got != 4 {
+		t.Fatalf("cached item count = %d, want 4", got)
+	}
+
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_first","output":"one"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]},` +
+		`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_second","output":"two"}` +
+		`]}`)
+	replayItems := filterCodexReasoningReplayItemsForInput(body, cachedItems)
+	updated, inserted := insertCodexReasoningReplayItems(body, replayItems)
+	if !inserted {
+		t.Fatal("expected accumulated reasoning items to be inserted")
+	}
+
+	input := gjson.GetBytes(updated, "input").Array()
+	if got := len(input); got != 8 {
+		t.Fatalf("input item count = %d, want 8; body=%s", got, string(updated))
+	}
+	if got := input[1].Get("encrypted_content").String(); got != firstEncryptedContent {
+		t.Fatalf("input.1 encrypted_content = %q, want first turn reasoning", got)
+	}
+	if got := input[2].Get("call_id").String(); got != "call_first" {
+		t.Fatalf("input.2 call_id = %q, want call_first; body=%s", got, string(updated))
+	}
+	if got := input[5].Get("encrypted_content").String(); got != secondEncryptedContent {
+		t.Fatalf("input.5 encrypted_content = %q, want second turn reasoning", got)
+	}
+	if got := input[6].Get("call_id").String(); got != "call_second" {
+		t.Fatalf("input.6 call_id = %q, want call_second; body=%s", got, string(updated))
+	}
+}
+
 func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
