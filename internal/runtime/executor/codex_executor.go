@@ -233,6 +233,10 @@ func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
+func (e *CodexExecutor) clampUnsupportedNone() bool {
+	return e != nil && e.cfg != nil && e.cfg.Codex.ClampUnsupportedNone
+}
+
 func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool) ([]byte, []byte) {
 	if bytes.Equal(originalPayload, payload) {
 		body := sdktranslator.TranslateRequest(from, to, model, payload, stream)
@@ -924,7 +928,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), thinking.WithClampUnsupportedNone(e.clampUnsupportedNone()))
 	if err != nil {
 		return resp, err
 	}
@@ -1105,7 +1109,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), thinking.WithClampUnsupportedNone(e.clampUnsupportedNone()))
 	if err != nil {
 		return resp, err
 	}
@@ -1210,7 +1214,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), thinking.WithClampUnsupportedNone(e.clampUnsupportedNone()))
 	if err != nil {
 		return nil, err
 	}
@@ -1370,7 +1374,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), thinking.WithClampUnsupportedNone(e.clampUnsupportedNone()))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

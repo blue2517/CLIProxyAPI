@@ -124,6 +124,20 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 	return modelInfo.UserDefined
 }
 
+type applyOptions struct {
+	clampUnsupportedNone bool
+}
+
+// ApplyOption configures host policy for thinking normalization.
+type ApplyOption func(*applyOptions)
+
+// WithClampUnsupportedNone remaps disabled thinking to the model's lowest advertised level when unsupported.
+func WithClampUnsupportedNone(enabled bool) ApplyOption {
+	return func(options *applyOptions) {
+		options.clampUnsupportedNone = enabled
+	}
+}
+
 // ApplyThinking applies thinking configuration to a request body.
 //
 // This is the unified entry point for all providers. It follows the processing
@@ -161,7 +175,14 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //
 //	// Without suffix - uses body config
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
-func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string, opts ...ApplyOption) ([]byte, error) {
+	var options applyOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
@@ -240,6 +261,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		}).Debug("thinking: no config found, passthrough |")
 		return body, nil
 	}
+	config.ClampUnsupportedNone = options.clampUnsupportedNone
 
 	// 5. Validate and normalize configuration
 	validated, err := ValidateConfig(config, modelInfo, fromFormat, providerFormat, suffixResult.HasSuffix)

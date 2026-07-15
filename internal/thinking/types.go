@@ -75,6 +75,8 @@ type ThinkingConfig struct {
 	Budget int
 	// Level is the thinking level, only effective when Mode is ModeLevel
 	Level ThinkingLevel
+	// ClampUnsupportedNone remaps ModeNone to the model's lowest advertised level when needed.
+	ClampUnsupportedNone bool
 }
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.

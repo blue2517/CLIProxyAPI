@@ -159,9 +159,8 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config = convertAutoToMidRange(config, support, toFormat, model)
 	}
 
-	if config.Mode == ModeNone && toFormat == "claude" {
-		// Claude supports explicit disable via thinking.type="disabled".
-		// Keep Budget=0 so applier can omit budget_tokens.
+	if config.Mode == ModeNone && (toFormat == "claude" || (toFormat == "codex" && !config.ClampUnsupportedNone)) {
+		// Claude supports explicit disable, while Codex forwards none unless legacy clamping is enabled.
 		config.Budget = 0
 		config.Level = ""
 	} else {

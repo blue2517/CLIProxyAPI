@@ -279,7 +279,8 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse      bool `yaml:"identity-confuse" json:"identity-confuse"`
+	ClampUnsupportedNone bool `yaml:"clamp-unsupported-none" json:"clamp-unsupported-none"`
 }
 
 // TLSConfig holds HTTPS server settings.

@@ -189,6 +189,10 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # When true, remap reasoning.effort=none to the model's lowest advertised level
+  # when the model catalog does not list none support (legacy behavior).
+  # Default false: pass reasoning.effort=none through to the Codex upstream.
+  clamp-unsupported-none: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

@@ -62,6 +62,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		result, _ := sjson.SetBytes(body, "reasoning.effort", string(config.Level))
 		return result, nil
 	}
+	if !config.ClampUnsupportedNone {
+		result, _ := sjson.SetBytes(body, "reasoning.effort", string(thinking.LevelNone))
+		result, _ = sjson.DeleteBytes(result, "reasoning.summary")
+		return result, nil
+	}
 
 	effort := ""
 	support := modelInfo.Thinking
@@ -81,6 +86,9 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	result, _ := sjson.SetBytes(body, "reasoning.effort", effort)
+	if effort == string(thinking.LevelNone) {
+		result, _ = sjson.DeleteBytes(result, "reasoning.summary")
+	}
 	return result, nil
 }
 
@@ -116,5 +124,8 @@ func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig) ([]byte, 
 	}
 
 	result, _ := sjson.SetBytes(body, "reasoning.effort", effort)
+	if effort == string(thinking.LevelNone) {
+		result, _ = sjson.DeleteBytes(result, "reasoning.summary")
+	}
 	return result, nil
 }

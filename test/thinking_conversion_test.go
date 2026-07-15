@@ -84,7 +84,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 4: Level none → clamped to minimal (ZeroAllowed=false)
+		// Case 4: Level none → forwarded unchanged by default
 		{
 			name:        "4",
 			from:        "openai",
@@ -92,7 +92,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "level-model(none)",
 			inputJSON:   `{"model":"level-model(none)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "minimal",
+			expectValue: "none",
 			expectErr:   false,
 		},
 		// Case 5: Level auto → DynamicAllowed=false → medium (mid-range)
@@ -139,7 +139,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 9: Budget 0 → clamped to minimal (ZeroAllowed=false)
+		// Case 9: Budget 0 → forwarded as none by default
 		{
 			name:        "9",
 			from:        "gemini",
@@ -147,7 +147,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "level-model(0)",
 			inputJSON:   `{"model":"level-model(0)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "minimal",
+			expectValue: "none",
 			expectErr:   false,
 		},
 		// Case 10: Budget -1 → auto → DynamicAllowed=false → medium (mid-range)
@@ -1142,7 +1142,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 4: reasoning_effort=none → clamped to minimal
+		// Case 4: reasoning_effort=none → forwarded unchanged by default
 		{
 			name:        "4",
 			from:        "openai",
@@ -1150,7 +1150,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "level-model",
 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
 			expectField: "reasoning.effort",
-			expectValue: "minimal",
+			expectValue: "none",
 			expectErr:   false,
 		},
 		// Case 5: reasoning_effort=auto → medium (DynamicAllowed=false)
@@ -1197,7 +1197,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 9: thinkingBudget=0 → clamped to minimal
+		// Case 9: thinkingBudget=0 → forwarded as none by default
 		{
 			name:        "9",
 			from:        "gemini",
@@ -1205,7 +1205,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "level-model",
 			inputJSON:   `{"model":"level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
 			expectField: "reasoning.effort",
-			expectValue: "minimal",
+			expectValue: "none",
 			expectErr:   false,
 		},
 		// Case 10: thinkingBudget=-1 → medium (DynamicAllowed=false)
@@ -3049,6 +3049,35 @@ func getTestModels() []*registry.ModelInfo {
 }
 
 // runThinkingTests runs thinking test cases using the real data flow path.
+func TestThinkingCodexClampUnsupportedNoneOption(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-codex-clamp-none-%d", time.Now().UnixNano())
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	body := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai"),
+		sdktranslator.FromString("codex"),
+		"level-model",
+		[]byte(`{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`),
+		true,
+	)
+	body, err := thinking.ApplyThinking(
+		body,
+		"level-model",
+		"openai",
+		"codex",
+		"codex",
+		thinking.WithClampUnsupportedNone(true),
+	)
+	if err != nil {
+		t.Fatalf("ApplyThinking() error = %v", err)
+	}
+	if effort := gjson.GetBytes(body, "reasoning.effort").String(); effort != "minimal" {
+		t.Fatalf("reasoning.effort = %q, want %q; body=%s", effort, "minimal", string(body))
+	}
+}
+
 func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 	for _, tc := range cases {
 		tc := tc
