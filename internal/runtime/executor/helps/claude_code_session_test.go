@@ -30,6 +30,24 @@ func TestExtractClaudeCodeSessionIDFromHeader(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeConversationKeySeparatesAgents(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"session_id\":\"shared-session\"}"}}`)
+	firstHeaders := http.Header{ClaudeCodeAgentHeader: []string{"agent-a"}}
+	secondHeaders := http.Header{ClaudeCodeAgentHeader: []string{"agent-b"}}
+
+	first := ClaudeCodeConversationKey(context.Background(), payload, firstHeaders)
+	second := ClaudeCodeConversationKey(context.Background(), payload, secondHeaders)
+	if first != "shared-session:agent:agent-a" {
+		t.Fatalf("first conversation key = %q", first)
+	}
+	if second != "shared-session:agent:agent-b" {
+		t.Fatalf("second conversation key = %q", second)
+	}
+	if first == second {
+		t.Fatalf("agent-specific conversation keys must differ")
+	}
+}
+
 func TestClaudeCodePromptCacheStableAcrossRequests(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte(`{"metadata":{"user_id":"{\"session_id\":\"cache-session-2\"}"}}`)

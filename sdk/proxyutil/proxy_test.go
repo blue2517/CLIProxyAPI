@@ -269,6 +269,119 @@ func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
 	}
 }
 
+// TestBuildDialerWithTimeoutHangingProxyFailsFast verifies that a proxy which
+// accepts the TCP connection but never answers the CONNECT request is abandoned
+// once the connect timeout elapses, instead of blocking indefinitely.
+func TestBuildDialerWithTimeoutHangingProxyFailsFast(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+
+	// Accept the connection but never reply, simulating a stuck proxy.
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		// Hold the connection open without responding.
+		time.Sleep(2 * time.Second)
+		_ = conn.Close()
+	}()
+
+	dialer, _, errBuild := BuildDialerWithTimeout("http://"+listener.Addr().String(), 200*time.Millisecond)
+	if errBuild != nil {
+		t.Fatalf("BuildDialerWithTimeout returned error: %v", errBuild)
+	}
+
+	start := time.Now()
+	conn, errDial := dialer.Dial("tcp", "target.example.com:443")
+	elapsed := time.Since(start)
+	if errDial == nil {
+		_ = conn.Close()
+		t.Fatal("expected dial to fail fast against a hanging proxy")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("dial took %v, expected to fail near the 200ms connect timeout", elapsed)
+	}
+}
+
+// TestBuildDialerWithTimeoutDoesNotBoundEstablishedReads verifies that once the
+// CONNECT tunnel is established, the connect deadline is cleared so a slow read
+// (longer than the connect timeout) is not interrupted. This guards against the
+// timeout leaking into the data phase (which would break non-streaming requests).
+func TestBuildDialerWithTimeoutDoesNotBoundEstablishedReads(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+
+	const connectTimeout = 200 * time.Millisecond
+	const slowReadDelay = 500 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			done <- errAccept
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		req, errRead := http.ReadRequest(bufio.NewReader(conn))
+		if errRead != nil {
+			done <- fmt.Errorf("read CONNECT request failed: %w", errRead)
+			return
+		}
+		if req.Method != http.MethodConnect {
+			done <- fmt.Errorf("method = %s, want CONNECT", req.Method)
+			return
+		}
+		if _, errWrite := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			done <- fmt.Errorf("write CONNECT response failed: %w", errWrite)
+			return
+		}
+		// Send the payload only after a delay that exceeds the connect timeout.
+		// If the deadline leaked into the data phase, the client read would fail.
+		time.Sleep(slowReadDelay)
+		if _, errWrite := io.WriteString(conn, "late"); errWrite != nil {
+			done <- fmt.Errorf("write delayed payload failed: %w", errWrite)
+			return
+		}
+		done <- nil
+	}()
+
+	dialer, _, errBuild := BuildDialerWithTimeout("http://"+listener.Addr().String(), connectTimeout)
+	if errBuild != nil {
+		t.Fatalf("BuildDialerWithTimeout returned error: %v", errBuild)
+	}
+
+	conn, errDial := dialer.Dial("tcp", "target.example.com:443")
+	if errDial != nil {
+		t.Fatalf("dialer.Dial returned error: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	buf := make([]byte, 4)
+	n, errReadFull := io.ReadFull(conn, buf)
+	if errReadFull != nil {
+		t.Fatalf("read after established tunnel failed after %d bytes: %v", n, errReadFull)
+	}
+	if string(buf) != "late" {
+		t.Fatalf("delayed payload = %q, want late", string(buf))
+	}
+
+	if errServer := <-done; errServer != nil {
+		t.Fatalf("proxy server returned error: %v", errServer)
+	}
+}
+
 func TestRedactProxyURL(t *testing.T) {
 	t.Parallel()
 

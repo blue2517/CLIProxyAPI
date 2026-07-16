@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -87,6 +88,15 @@ func NewDirectTransport() *http.Transport {
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
+	return BuildHTTPTransportWithTimeout(raw, 0)
+}
+
+// BuildHTTPTransportWithTimeout constructs an HTTP transport that bounds the
+// connection-establishment phase by the provided timeout. A non-positive
+// timeout preserves the default transport behavior. For HTTP/HTTPS proxies the
+// cloned default transport already bounds dialing and TLS handshakes; for SOCKS5
+// proxies the custom DialContext is bounded explicitly.
+func BuildHTTPTransportWithTimeout(raw string, timeout time.Duration) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
@@ -111,13 +121,26 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
-			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if timeout > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, timeout)
+					defer cancel()
+				}
+				if ctxDialer, ok := dialer.(proxy.ContextDialer); ok {
+					return ctxDialer.DialContext(ctx, network, addr)
+				}
 				return dialer.Dial(network, addr)
 			}
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
 		transport.Proxy = http.ProxyURL(setting.URL)
+		if timeout > 0 {
+			transport.TLSHandshakeTimeout = timeout
+			baseDialer := &net.Dialer{Timeout: timeout}
+			transport.DialContext = baseDialer.DialContext
+		}
 		return transport, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
@@ -126,6 +149,15 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
 func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
+	return BuildDialerWithTimeout(raw, 0)
+}
+
+// BuildDialerWithTimeout constructs a proxy dialer that bounds the
+// connection-establishment phase (dial + TLS handshake + HTTP CONNECT) by the
+// provided timeout. A non-positive timeout disables the bound. The deadline is
+// always cleared before the connection is returned, so it never applies to
+// subsequent reads/writes on the established connection.
+func BuildDialerWithTimeout(raw string, timeout time.Duration) (proxy.Dialer, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
@@ -138,11 +170,14 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
-			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct}, setting.Mode, nil
+			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct, timeout: timeout}, setting.Mode, nil
 		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
+		}
+		if timeout > 0 {
+			return &timeoutDialer{dialer: dialer, timeout: timeout}, setting.Mode, nil
 		}
 		return dialer, setting.Mode, nil
 	default:
@@ -150,18 +185,52 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	}
 }
 
+// timeoutDialer bounds the dial of an underlying ContextDialer (e.g. the SOCKS5
+// dialer from x/net/proxy) by a timeout that only covers establishing the
+// connection. The context is cancelled once Dial returns; x/net's SOCKS5 dialer
+// does not retain the context past connection setup, so the established
+// connection is unaffected.
+type timeoutDialer struct {
+	dialer  proxy.Dialer
+	timeout time.Duration
+}
+
+func (d *timeoutDialer) Dial(network, addr string) (net.Conn, error) {
+	if ctxDialer, ok := d.dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+		defer cancel()
+		return ctxDialer.DialContext(ctx, network, addr)
+	}
+	return d.dialer.Dial(network, addr)
+}
+
 type httpConnectDialer struct {
 	proxyURL *url.URL
 	dialer   proxy.Dialer
+	timeout  time.Duration
 }
 
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
-	proxyConn, errDial := d.dialer.Dial(network, proxyDialAddr(d.proxyURL))
+	var deadline time.Time
+	if d.timeout > 0 {
+		deadline = time.Now().Add(d.timeout)
+	}
+
+	proxyConn, errDial := d.dialProxy(network, deadline)
 	if errDial != nil {
 		return nil, fmt.Errorf("dial HTTP proxy failed: %w", errDial)
 	}
 
 	conn := proxyConn
+	// Bound the CONNECT handshake (and TLS handshake for https proxies) by the
+	// connection-establishment deadline. It is cleared before returning so reads
+	// and writes on the tunneled connection are never time-bounded.
+	if !deadline.IsZero() {
+		if errDeadline := conn.SetDeadline(deadline); errDeadline != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("set proxy connect deadline failed: %w", errDeadline)
+		}
+	}
 	if d.proxyURL.Scheme == "https" {
 		tlsConn := tls.Client(conn, &tls.Config{ServerName: d.proxyURL.Hostname()})
 		if errHandshake := tlsConn.Handshake(); errHandshake != nil {
@@ -207,10 +276,35 @@ func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("proxy CONNECT returned status %s", resp.Status)
 	}
 
+	// Connection established: clear the deadline so subsequent reads/writes on the
+	// tunneled connection are never time-bounded.
+	if !deadline.IsZero() {
+		if errClear := conn.SetDeadline(time.Time{}); errClear != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("clear proxy connect deadline failed: %w", errClear)
+		}
+	}
+
 	if reader.Buffered() > 0 {
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	}
 	return conn, nil
+}
+
+// dialProxy dials the proxy server, bounding the dial by deadline when set.
+func (d *httpConnectDialer) dialProxy(network string, deadline time.Time) (net.Conn, error) {
+	addr := proxyDialAddr(d.proxyURL)
+	if deadline.IsZero() {
+		return d.dialer.Dial(network, addr)
+	}
+	if ctxDialer, ok := d.dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		return ctxDialer.DialContext(ctx, network, addr)
+	}
+	// proxy.Direct implements ContextDialer, so this fallback is only reached for
+	// custom dialers without context support.
+	return d.dialer.Dial(network, addr)
 }
 
 func proxyDialAddr(proxyURL *url.URL) string {
