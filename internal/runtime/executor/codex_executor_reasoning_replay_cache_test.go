@@ -222,6 +222,32 @@ func TestCodexExecutorReasoningReplayCacheDoesNotLeakAcrossClaudeCodeAgents(t *t
 	}
 }
 
+func TestCodexExecutorReasoningReplayCacheSkipsExplicitlyDisabledClaudeThinking(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"session_id\":\"disabled-thinking-session\"}"},
+			"thinking":{"type":"disabled"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]
+		}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"stable instructions"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:disabled-thinking-session", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+validCodexReasoningEncryptedContentForTestSeed(14)+`"}`))
+
+	updated, scope := applyCodexReasoningReplayCache(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from}, body)
+	if scope.valid() {
+		t.Fatalf("disabled Claude thinking unexpectedly created replay scope: %#v", scope)
+	}
+	if string(updated) != string(body) {
+		t.Fatalf("disabled Claude thinking injected replay data: %s", string(updated))
+	}
+}
+
 func TestCodexExecutorReasoningReplaySessionKeyRejectsBareClaudeUserID(t *testing.T) {
 	from := sdktranslator.FromString("claude")
 	req := cliproxyexecutor.Request{
@@ -428,9 +454,8 @@ func TestCodexExecutorReasoningReplayCacheDoesNotDuplicateClaudeClientReasoning(
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
-	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(5)
 	clientEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(6)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-2", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-2", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+clientEncryptedContent+`"}`))
 
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -773,26 +798,29 @@ func TestCodexExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult
 	}
 }
 
-func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput(t *testing.T) {
+func TestCodexExecutorReasoningReplayCacheUsesExistingToolCallAsReplayAnchor(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
-	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(14)
+	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(15)
 	scope := codexReasoningReplayScope{
 		modelName:  "gpt-5.4",
-		sessionKey: "claude:session-dropped-tool",
+		sessionKey: "claude:session-existing-tool",
 	}
 	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
 		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"},`+
-		`{"type":"function_call","call_id":"call_dropped","name":"TaskCreate","arguments":"{}"}`+
+		`{"type":"function_call","call_id":"call_existing","name":"lookup","arguments":"{}"}`+
 		`]}}`))
 
-	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"function_call","call_id":"call_existing","name":"lookup","arguments":"{}"}` +
+		`]}`)
 	req := cliproxyexecutor.Request{
 		Model: "gpt-5.4",
 		Payload: []byte(`{
 			"model":"gpt-5.4",
-			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-dropped-tool\"}"},
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-existing-tool\"}"},
 			"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]
 		}`),
 	}
@@ -807,17 +835,193 @@ func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput
 	if replayScope != scope {
 		t.Fatalf("replay scope = %#v, want %#v", replayScope, scope)
 	}
-	if got := gjson.GetBytes(updated, "input.0.type").String(); got != "reasoning" {
-		t.Fatalf("input.0.type = %q, want reasoning; body=%s", got, string(updated))
+	if got := gjson.GetBytes(updated, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user; body=%s", got, string(updated))
 	}
-	if got := gjson.GetBytes(updated, "input.0.encrypted_content").String(); got != encryptedContent {
-		t.Fatalf("input.0.encrypted_content = %q, want cached reasoning; body=%s", got, string(updated))
+	if got := gjson.GetBytes(updated, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want reasoning before existing tool call; body=%s", got, string(updated))
 	}
-	if gjson.GetBytes(updated, `input.#(call_id=="call_dropped")`).Exists() {
-		t.Fatalf("cached function_call without matching output should not be replayed; body=%s", string(updated))
+	if got := gjson.GetBytes(updated, "input.1.encrypted_content").String(); got != encryptedContent {
+		t.Fatalf("input.1.encrypted_content = %q, want %q; body=%s", got, encryptedContent, string(updated))
 	}
-	if got := gjson.GetBytes(updated, "input.1.role").String(); got != "user" {
-		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(updated))
+	if got := gjson.GetBytes(updated, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want existing function_call; body=%s", got, string(updated))
+	}
+
+	functionCallCount := 0
+	for _, item := range gjson.GetBytes(updated, "input").Array() {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call_existing" {
+			functionCallCount++
+		}
+	}
+	if functionCallCount != 1 {
+		t.Fatalf("function_call count = %d, want 1 without a duplicate replay item; body=%s", functionCallCount, string(updated))
+	}
+}
+
+func TestCodexExecutorReasoningReplayCachePreservesEarlierToolTurnAnchors(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	firstEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(21)
+	secondEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(22)
+	scope := codexReasoningReplayScope{
+		modelName:  "gpt-5.4",
+		sessionKey: "claude:session-multiple-tool-turns",
+	}
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+firstEncryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"}`+
+		`]}}`))
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+secondEncryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"}`+
+		`]}}`))
+
+	cachedItems, ok := internalcache.GetCodexReasoningReplayItems(scope.modelName, scope.sessionKey)
+	if !ok {
+		t.Fatal("expected accumulated reasoning replay cache entry")
+	}
+	if got := len(cachedItems); got != 4 {
+		t.Fatalf("cached item count = %d, want 4", got)
+	}
+
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_first","output":"one"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]},` +
+		`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_second","output":"two"}` +
+		`]}`)
+	replayItems := filterCodexReasoningReplayItemsForInput(body, cachedItems)
+	updated, inserted := insertCodexReasoningReplayItems(body, replayItems)
+	if !inserted {
+		t.Fatal("expected accumulated reasoning items to be inserted")
+	}
+
+	input := gjson.GetBytes(updated, "input").Array()
+	if got := len(input); got != 8 {
+		t.Fatalf("input item count = %d, want 8; body=%s", got, string(updated))
+	}
+	if got := input[1].Get("encrypted_content").String(); got != firstEncryptedContent {
+		t.Fatalf("input.1 encrypted_content = %q, want first turn reasoning", got)
+	}
+	if got := input[2].Get("call_id").String(); got != "call_first" {
+		t.Fatalf("input.2 call_id = %q, want call_first; body=%s", got, string(updated))
+	}
+	if got := input[5].Get("encrypted_content").String(); got != secondEncryptedContent {
+		t.Fatalf("input.5 encrypted_content = %q, want second turn reasoning", got)
+	}
+	if got := input[6].Get("call_id").String(); got != "call_second" {
+		t.Fatalf("input.6 call_id = %q, want call_second; body=%s", got, string(updated))
+	}
+}
+
+func TestCodexExecutorReasoningReplayCacheDeduplicatesReasoningPerToolGroup(t *testing.T) {
+	firstEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(23)
+	secondEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(24)
+	cachedItems := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + firstEncryptedContent + `"}`),
+		[]byte(`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"}`),
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + secondEncryptedContent + `"}`),
+		[]byte(`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + firstEncryptedContent + `"},` +
+		`{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_first","output":"one"},` +
+		`{"type":"function_call","call_id":"call_second","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_second","output":"two"}` +
+		`]}`)
+
+	replayItems := filterCodexReasoningReplayItemsForInput(body, cachedItems)
+	updated, inserted := insertCodexReasoningReplayItems(body, replayItems)
+	if !inserted {
+		t.Fatal("expected missing reasoning for the second tool group to be inserted")
+	}
+
+	input := gjson.GetBytes(updated, "input").Array()
+	if got := len(input); got != 7 {
+		t.Fatalf("input item count = %d, want 7; body=%s", got, string(updated))
+	}
+	reasoningCounts := map[string]int{}
+	for _, item := range input {
+		if item.Get("type").String() == "reasoning" {
+			reasoningCounts[item.Get("encrypted_content").String()]++
+		}
+	}
+	if got := reasoningCounts[firstEncryptedContent]; got != 1 {
+		t.Fatalf("first reasoning count = %d, want 1; body=%s", got, string(updated))
+	}
+	if got := reasoningCounts[secondEncryptedContent]; got != 1 {
+		t.Fatalf("second reasoning count = %d, want 1; body=%s", got, string(updated))
+	}
+	if got := input[4].Get("encrypted_content").String(); got != secondEncryptedContent {
+		t.Fatalf("input.4 encrypted_content = %q, want second tool group reasoning; body=%s", got, string(updated))
+	}
+	if got := input[5].Get("call_id").String(); got != "call_second" {
+		t.Fatalf("input.5 call_id = %q, want call_second; body=%s", got, string(updated))
+	}
+}
+
+func TestCodexExecutorReasoningReplayCacheDropsToolGroupWithoutMatchingOutputAfterCompact(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(14)
+	scope := codexReasoningReplayScope{
+		modelName:  "gpt-5.4",
+		sessionKey: "claude:session-dropped-tool",
+	}
+	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
+		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"},`+
+		`{"type":"function_call","call_id":"call_dropped","name":"TaskCreate","arguments":"{}"}`+
+		`]}}`))
+
+	body := []byte(`{"model":"gpt-5.4","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"compacted summary"}]},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"latest answer"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}` +
+		`]}`)
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-dropped-tool\"}"},
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"compacted summary"}]},
+				{"role":"assistant","content":[{"type":"text","text":"latest answer"}]},
+				{"role":"user","content":[{"type":"text","text":"next"}]}
+			]
+		}`),
+	}
+
+	updated, replayScope := applyCodexReasoningReplayCache(
+		context.Background(),
+		sdktranslator.FromString("claude"),
+		req,
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		body,
+	)
+	if replayScope != scope {
+		t.Fatalf("replay scope = %#v, want %#v", replayScope, scope)
+	}
+	input := gjson.GetBytes(updated, "input").Array()
+	if got := len(input); got != 3 {
+		t.Fatalf("input item count = %d, want compacted input unchanged; body=%s", got, string(updated))
+	}
+	for _, item := range input {
+		if item.Get("type").String() == "reasoning" {
+			t.Fatalf("reasoning without a matching tool output should not be replayed; body=%s", string(updated))
+		}
+		if item.Get("call_id").String() == "call_dropped" {
+			t.Fatalf("function_call without a matching output should not be replayed; body=%s", string(updated))
+		}
+	}
+	if got := input[1].Get("role").String(); got != "assistant" {
+		t.Fatalf("input.1.role = %q, want compacted assistant message unchanged; body=%s", got, string(updated))
 	}
 }
 

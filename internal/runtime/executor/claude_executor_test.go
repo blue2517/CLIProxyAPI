@@ -2953,12 +2953,12 @@ func TestEnsureClaudeThinkingDisplay_SetsSummarizedWhenMissing(t *testing.T) {
 	}
 }
 
-func TestEnsureClaudeThinkingDisplay_PreservesExplicitValue(t *testing.T) {
+func TestEnsureClaudeThinkingDisplay_OverridesOmittedToSummarized(t *testing.T) {
 	payload := []byte(`{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`)
 	out := ensureClaudeThinkingDisplay(payload)
 
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "omitted" {
-		t.Fatalf("thinking.display = %q, want omitted", got)
+	if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+		t.Fatalf("thinking.display = %q, want summarized (omitted must be overridden)", got)
 	}
 }
 

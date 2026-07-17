@@ -7,7 +7,7 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Commands
 ```bash
-gofmt -w . # Format (required after Go changes)
+gofmt -w <changed-go-files> # Format only changed Go files (required after Go changes)
 go build -o cli-proxy-api ./cmd/server # Build
 go run ./cmd/server # Run dev server
 go test ./... # Run all tests

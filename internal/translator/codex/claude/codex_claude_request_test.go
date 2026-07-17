@@ -183,6 +183,17 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_UsesCurrentTurnReasoningContext(t *testing.T) {
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(`{
+		"model": "gpt-5.4",
+		"messages": [{"role": "user", "content": "hello"}]
+	}`), false)
+
+	if got := gjson.GetBytes(result, "reasoning.context").String(); got != "current_turn" {
+		t.Fatalf("reasoning.context = %q, want current_turn. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 	tests := []struct {
 		name            string

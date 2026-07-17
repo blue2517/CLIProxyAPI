@@ -340,6 +340,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
 	template, _ = sjson.SetBytes(template, "reasoning.summary", "auto")
+	template, _ = sjson.SetBytes(template, "reasoning.context", "current_turn")
 	if serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier")); serviceTier != "" {
 		template, _ = sjson.SetBytes(template, "service_tier", serviceTier)
 	}

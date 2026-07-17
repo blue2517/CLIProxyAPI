@@ -897,10 +897,10 @@ func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	return body
 }
 
-// ensureClaudeThinkingDisplay defaults thinking.display to "summarized" when thinking
-// is active and the client did not set display. Without this, Claude backends that
-// enable redact-thinking return signature-only thinking blocks (empty thinking text).
-// Explicit client values such as "omitted" are preserved.
+// ensureClaudeThinkingDisplay forces thinking.display to "summarized" when thinking
+// is active. The redact-thinking beta already prevents raw thinking from leaking,
+// so "omitted" provides no extra benefit, and it destabilizes the upstream prefix
+// cache (random hit-rate drops with byte-identical prefixes).
 func ensureClaudeThinkingDisplay(body []byte) []byte {
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
@@ -908,7 +908,7 @@ func ensureClaudeThinkingDisplay(body []byte) []byte {
 	default:
 		return body
 	}
-	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display != "" {
+	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display == "summarized" {
 		return body
 	}
 	out, err := sjson.SetBytes(body, "thinking.display", "summarized")

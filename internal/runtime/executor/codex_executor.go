@@ -336,7 +336,7 @@ func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktransla
 }
 
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
-	if !codexReasoningReplayEnabledForSource(from) {
+	if !codexReasoningReplayEnabledForRequest(from, req.Model, req.Payload) {
 		return codexReasoningReplayScope{}
 	}
 	return codexReasoningReplayScope{
@@ -345,8 +345,13 @@ func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslato
 	}
 }
 
-func codexReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
-	return sourceFormatEqual(from, sdktranslator.FormatClaude)
+func codexReasoningReplayEnabledForRequest(from sdktranslator.Format, model string, payload []byte) bool {
+	if !sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		return false
+	}
+	// Replaying encrypted reasoning into a request that explicitly disabled
+	// thinking adds volatile input without a matching Claude reasoning turn.
+	return thinking.ExtractReasoningEffort(payload, from.String(), model) != string(thinking.LevelNone)
 }
 
 func sourceFormatEqual(from, want sdktranslator.Format) bool {
@@ -463,10 +468,11 @@ func codexReasoningReplaySessionKeyFromTurnMetadata(turnMetadata string) string 
 	return ""
 }
 
-func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
+func codexInputValidReasoningEncryptedContents(body []byte) map[string]bool {
+	existing := make(map[string]bool)
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
-		return false
+		return existing
 	}
 	for _, item := range input.Array() {
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
@@ -476,11 +482,12 @@ func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
 		if encryptedContent.Type != gjson.String {
 			continue
 		}
-		if _, err := signature.InspectGPTReasoningSignature(encryptedContent.String()); err == nil {
-			return true
+		value := encryptedContent.String()
+		if _, err := signature.InspectGPTReasoningSignature(value); err == nil {
+			existing[value] = true
 		}
 	}
-	return false
+	return existing
 }
 
 func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte {
@@ -489,58 +496,75 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 		return nil
 	}
 
-	hasInputReasoning := codexInputHasValidReasoningEncryptedContent(body)
-	existingCalls := make(map[string]bool)
-	existingOutputs := make(map[string]bool)
+	existingReasoning := codexInputValidReasoningEncryptedContents(body)
+	existingToolAnchors := make(map[string]bool)
 	for _, inputItem := range input.Array() {
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
-		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+		switch itemType {
+		case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
 			callID := strings.TrimSpace(inputItem.Get("call_id").String())
 			if callID != "" {
 				for _, candidate := range codexReplayComparableCallIDs(callID) {
-					existingOutputs[candidate] = true
+					existingToolAnchors[candidate] = true
 				}
 			}
-		}
-		for _, key := range codexReplayToolCallKeys(inputItem) {
-			existingCalls[key] = true
 		}
 	}
 
 	filtered := make([][]byte, 0, len(items))
-	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
-		switch strings.TrimSpace(itemResult.Get("type").String()) {
-		case "reasoning":
-			if hasInputReasoning {
-				continue
-			}
-		case "function_call", "custom_tool_call":
-			keys := codexReplayToolCallKeys(itemResult)
-			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
-				continue
-			}
-			// Only inject if there is a matching output in the request
-			hasMatchingOutput := false
-			callID := strings.TrimSpace(itemResult.Get("call_id").String())
-			if callID != "" {
-				for _, candidate := range codexReplayComparableCallIDs(callID) {
-					if existingOutputs[candidate] {
-						hasMatchingOutput = true
+	replayCalls := make(map[string]bool)
+	for _, group := range splitCodexReasoningReplayGroups(items) {
+		filteredGroup := make([][]byte, 0, len(group))
+		groupReasoning := make([]string, 0)
+		groupReasoningSeen := make(map[string]bool)
+		groupHasToolCalls := false
+		groupHasMatchingToolAnchor := false
+		for _, item := range group {
+			itemResult := gjson.ParseBytes(item)
+			switch strings.TrimSpace(itemResult.Get("type").String()) {
+			case "reasoning":
+				encryptedContent := itemResult.Get("encrypted_content")
+				if encryptedContent.Type != gjson.String {
+					continue
+				}
+				value := encryptedContent.String()
+				if existingReasoning[value] || groupReasoningSeen[value] {
+					continue
+				}
+				groupReasoningSeen[value] = true
+				groupReasoning = append(groupReasoning, value)
+				filteredGroup = append(filteredGroup, item)
+			case "function_call", "custom_tool_call":
+				groupHasToolCalls = true
+				keys := codexReplayToolCallKeys(itemResult)
+				if len(keys) == 0 || codexReplayAnyToolCallKeyExists(replayCalls, keys) {
+					continue
+				}
+				// Only inject if the request still contains the matching call or output.
+				hasMatchingToolAnchor := false
+				for _, candidate := range codexReplayComparableCallIDs(itemResult.Get("call_id").String()) {
+					if existingToolAnchors[candidate] {
+						hasMatchingToolAnchor = true
 						break
 					}
 				}
+				if !hasMatchingToolAnchor {
+					continue
+				}
+				for _, key := range keys {
+					replayCalls[key] = true
+				}
+				groupHasMatchingToolAnchor = true
+				filteredGroup = append(filteredGroup, item)
 			}
-			if !hasMatchingOutput {
-				continue
-			}
-			for _, key := range keys {
-				existingCalls[key] = true
-			}
-		default:
+		}
+		if groupHasToolCalls && !groupHasMatchingToolAnchor {
 			continue
 		}
-		filtered = append(filtered, item)
+		filtered = append(filtered, filteredGroup...)
+		for _, encryptedContent := range groupReasoning {
+			existingReasoning[encryptedContent] = true
+		}
 	}
 	return filtered
 }
@@ -551,27 +575,86 @@ func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte,
 		return body, false
 	}
 	inputItems := input.Array()
-	insertIndex := codexReasoningReplayInsertIndex(inputItems, replayItems)
-	replayItems = codexAlignReasoningReplayToolCallIDs(inputItems, replayItems)
-	items := make([]string, 0, len(inputItems)+len(replayItems))
-	for i, inputItem := range inputItems {
-		if i == insertIndex {
-			for _, replayItem := range replayItems {
-				items = append(items, string(replayItem))
-			}
+	insertions := make(map[int][]string)
+	insertionCount := 0
+	for _, group := range splitCodexReasoningReplayGroups(replayItems) {
+		group = codexAlignReasoningReplayToolCallIDs(inputItems, group)
+		insertIndex := codexReasoningReplayInsertIndex(inputItems, group)
+		group = codexDropReasoningReplayToolCallsAlreadyInInput(inputItems, group)
+		if len(group) == 0 {
+			continue
 		}
+		for _, replayItem := range group {
+			insertions[insertIndex] = append(insertions[insertIndex], string(replayItem))
+			insertionCount++
+		}
+	}
+	if insertionCount == 0 {
+		return body, false
+	}
+	items := make([]string, 0, len(inputItems)+insertionCount)
+	for i, inputItem := range inputItems {
+		items = append(items, insertions[i]...)
 		items = append(items, inputItem.Raw)
 	}
-	if insertIndex == len(inputItems) {
-		for _, replayItem := range replayItems {
-			items = append(items, string(replayItem))
-		}
-	}
+	items = append(items, insertions[len(inputItems)]...)
 	updated, err := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(items, ",")+"]"))
 	if err != nil {
 		return body, false
 	}
 	return updated, true
+}
+
+// splitCodexReasoningReplayGroups keeps each reasoning run with the tool calls
+// produced by the same assistant turn. A new reasoning item after a tool call
+// starts the next turn.
+func splitCodexReasoningReplayGroups(items [][]byte) [][][]byte {
+	groups := make([][][]byte, 0)
+	group := make([][]byte, 0)
+	groupHasToolCall := false
+	for _, item := range items {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if itemType == "reasoning" && groupHasToolCall {
+			groups = append(groups, group)
+			group = make([][]byte, 0)
+			groupHasToolCall = false
+		}
+		group = append(group, item)
+		if itemType == "function_call" || itemType == "custom_tool_call" {
+			groupHasToolCall = true
+		}
+	}
+	if len(group) > 0 {
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+// codexDropReasoningReplayToolCallsAlreadyInInput leaves cached reasoning in
+// place while avoiding duplicate tool calls that Claude has already replayed
+// in its conversation history. The original calls still anchor the reasoning
+// at the correct causal position.
+func codexDropReasoningReplayToolCallsAlreadyInInput(inputItems []gjson.Result, replayItems [][]byte) [][]byte {
+	existingCalls := make(map[string]bool)
+	for _, inputItem := range inputItems {
+		for _, key := range codexReplayToolCallKeys(inputItem) {
+			existingCalls[key] = true
+		}
+	}
+	if len(existingCalls) == 0 {
+		return replayItems
+	}
+
+	filtered := make([][]byte, 0, len(replayItems))
+	for _, replayItem := range replayItems {
+		itemResult := gjson.ParseBytes(replayItem)
+		itemType := strings.TrimSpace(itemResult.Get("type").String())
+		if (itemType == "function_call" || itemType == "custom_tool_call") && codexReplayAnyToolCallKeyExists(existingCalls, codexReplayToolCallKeys(itemResult)) {
+			continue
+		}
+		filtered = append(filtered, replayItem)
+	}
+	return filtered
 }
 
 func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]byte) int {
@@ -587,6 +670,16 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 		}
 	}
 	if len(replayCallIDs) > 0 {
+		for index, inputItem := range inputItems {
+			itemType := strings.TrimSpace(inputItem.Get("type").String())
+			if itemType != "function_call" && itemType != "custom_tool_call" {
+				continue
+			}
+			callID := strings.TrimSpace(inputItem.Get("call_id").String())
+			if callID != "" && replayCallIDs[callID] {
+				return index
+			}
+		}
 		for index, inputItem := range inputItems {
 			itemType := strings.TrimSpace(inputItem.Get("type").String())
 			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
@@ -760,9 +853,87 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 			continue
 		}
 	}
+	if len(items) == 0 {
+		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
+		return
+	}
+	existing, ok, errExisting := internalcache.GetCodexReasoningReplayItemsRequired(context.Background(), scope.modelName, scope.sessionKey)
+	if errExisting != nil {
+		log.Errorf("codex reasoning replay history read failed: %v", errExisting)
+		return
+	}
+	if ok {
+		items = mergeCodexReasoningReplayItems(existing, items)
+	}
 	if !internalcache.CacheCodexReasoningReplayItemsBestEffort(context.Background(), scope.modelName, scope.sessionKey, items) {
 		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
 	}
+}
+
+func mergeCodexReasoningReplayItems(existing, current [][]byte) [][]byte {
+	if len(existing) == 0 {
+		return current
+	}
+	if len(current) == 0 {
+		return existing
+	}
+
+	existingGroups := splitCodexReasoningReplayGroups(existing)
+	if len(existingGroups) > 0 && !codexReasoningReplayGroupHasToolCall(existingGroups[len(existingGroups)-1]) {
+		existingGroups = existingGroups[:len(existingGroups)-1]
+	}
+
+	merged := make([][]byte, 0, len(existing)+len(current))
+	knownCalls := make(map[string]bool)
+	knownReasoning := make(map[string]bool)
+	appendGroup := func(group [][]byte) {
+		for _, item := range group {
+			itemResult := gjson.ParseBytes(item)
+			for _, key := range codexReplayToolCallKeys(itemResult) {
+				knownCalls[key] = true
+			}
+			if itemResult.Get("type").String() == "reasoning" {
+				knownReasoning[itemResult.Get("encrypted_content").String()] = true
+			}
+			merged = append(merged, item)
+		}
+	}
+	for _, group := range existingGroups {
+		appendGroup(group)
+	}
+	for _, group := range splitCodexReasoningReplayGroups(current) {
+		groupHasNewCall := false
+		groupHasToolCall := false
+		groupHasNewReasoning := false
+		for _, item := range group {
+			itemResult := gjson.ParseBytes(item)
+			keys := codexReplayToolCallKeys(itemResult)
+			if len(keys) > 0 {
+				groupHasToolCall = true
+				if !codexReplayAnyToolCallKeyExists(knownCalls, keys) {
+					groupHasNewCall = true
+				}
+			}
+			if itemResult.Get("type").String() == "reasoning" && !knownReasoning[itemResult.Get("encrypted_content").String()] {
+				groupHasNewReasoning = true
+			}
+		}
+		if (groupHasToolCall && !groupHasNewCall) || (!groupHasToolCall && !groupHasNewReasoning) {
+			continue
+		}
+		appendGroup(group)
+	}
+	return merged
+}
+
+func codexReasoningReplayGroupHasToolCall(group [][]byte) bool {
+	for _, item := range group {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if itemType == "function_call" || itemType == "custom_tool_call" {
+			return true
+		}
+	}
+	return false
 }
 
 func clearCodexReasoningReplayOnInvalidSignature(ctx context.Context, scope codexReasoningReplayScope, statusCode int, body []byte) error {
