@@ -843,6 +843,10 @@ func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 // normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
 // when tools are absent or empty (including after normalizeXAITools filtering).
 // xAI rejects payloads that include tool_choice without any tools defined.
+// When tools are present, it also rewrites OpenAI/Codex-style forced built-in
+// tool choices such as {"type":"web_search"} to the string "required".
+// xAI accepts auto/none/required and function selection, but not server-side
+// built-in tool type objects.
 // Existence checks avoid unnecessary sjson parse/copy passes.
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
@@ -859,19 +863,49 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 			}
 		}
 	}
-	if hasTools {
+	if !hasTools {
+		if tools.Exists() {
+			body, _ = sjson.DeleteBytes(body, "tools")
+		}
+		if gjson.GetBytes(body, "tool_choice").Exists() {
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		}
+		if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
+			body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+		}
 		return body
 	}
-	if tools.Exists() {
-		body, _ = sjson.DeleteBytes(body, "tools")
+	return normalizeXAIToolChoiceShape(body)
+}
+
+// normalizeXAIToolChoiceShape rewrites tool_choice values that xAI cannot
+// deserialize. Claude-to-Codex translation maps a forced native web_search
+// choice to {"type":"web_search"}; OpenAI accepts that shape, while xAI does
+// not. Map non-function built-in tool objects to "required" so a tool remains
+// mandatory without sending an unsupported forced-choice object.
+func normalizeXAIToolChoiceShape(body []byte) []byte {
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.Exists() || toolChoice.Type == gjson.String {
+		return body
 	}
-	if gjson.GetBytes(body, "tool_choice").Exists() {
-		body, _ = sjson.DeleteBytes(body, "tool_choice")
+	if toolChoice.Type != gjson.JSON || !toolChoice.IsObject() {
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "auto")
+		if errSet != nil {
+			return body
+		}
+		return updated
 	}
-	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
-		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+
+	switch toolChoice.Get("type").String() {
+	case "function", "auto", "none", "required", "allowed_tools", "":
+		return body
+	default:
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
+		if errSet != nil {
+			return body
+		}
+		return updated
 	}
-	return body
 }
 
 // normalizeXAINamespaceToolChoice qualifies namespaced function choices using
