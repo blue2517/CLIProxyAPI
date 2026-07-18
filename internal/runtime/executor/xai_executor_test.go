@@ -2846,6 +2846,62 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAIToolChoiceForTools_RewritesBuiltInToolTypeObject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantChoice string
+	}{
+		{
+			name:       "web_search forced choice becomes required",
+			body:       `{"model":"grok-4.5","tools":[{"type":"web_search"}],"tool_choice":{"type":"web_search"},"input":"hi"}`,
+			wantChoice: "required",
+		},
+		{
+			name:       "x_search forced choice becomes required",
+			body:       `{"model":"grok-4.5","tools":[{"type":"x_search"}],"tool_choice":{"type":"x_search"},"input":"hi"}`,
+			wantChoice: "required",
+		},
+		{
+			name:       "function object choice is preserved",
+			body:       `{"model":"grok-4.5","tools":[{"type":"function","name":"lookup"}],"tool_choice":{"type":"function","name":"lookup"},"input":"hi"}`,
+			wantChoice: `{"type":"function","name":"lookup"}`,
+		},
+		{
+			name:       "string auto is preserved",
+			body:       `{"model":"grok-4.5","tools":[{"type":"web_search"}],"tool_choice":"auto","input":"hi"}`,
+			wantChoice: "auto",
+		},
+		{
+			name:       "string required is preserved",
+			body:       `{"model":"grok-4.5","tools":[{"type":"web_search"}],"tool_choice":"required","input":"hi"}`,
+			wantChoice: "required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := normalizeXAIToolChoiceForTools([]byte(tt.body))
+			got := gjson.GetBytes(out, "tool_choice")
+			if !got.Exists() {
+				t.Fatalf("tool_choice missing: %s", string(out))
+			}
+			if got.Type == gjson.String {
+				if got.String() != tt.wantChoice {
+					t.Fatalf("tool_choice = %q, want %q; body=%s", got.String(), tt.wantChoice, string(out))
+				}
+				return
+			}
+			if got.Raw != tt.wantChoice {
+				t.Fatalf("tool_choice = %s, want %s; body=%s", got.Raw, tt.wantChoice, string(out))
+			}
+		})
+	}
+}
+
 func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
