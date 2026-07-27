@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -25,25 +26,31 @@ type utlsRoundTripper struct {
 	// pending tracks hosts that are currently being connected to (prevents race condition)
 	pending map[string]*sync.Cond
 	// dialer is used to create network connections, supporting proxies
-	dialer proxy.Dialer
+	dialer         proxy.Dialer
+	connectTimeout time.Duration
 }
 
 // newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
+	connectTimeout := time.Duration(0)
 	if cfg != nil {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+		proxyDialer, mode, errBuild := proxyutil.BuildDialerWithTimeout(cfg.ProxyURL, cfg.ProxyConnectTimeout())
 		if errBuild != nil {
 			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				connectTimeout = cfg.ProxyConnectTimeout()
+			}
 		}
 	}
 
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+		connections:    make(map[string]*http2.ClientConn),
+		pending:        make(map[string]*sync.Cond),
+		dialer:         dialer,
+		connectTimeout: connectTimeout,
 	}
 }
 
@@ -103,6 +110,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	if err != nil {
 		return nil, err
 	}
+	if t.connectTimeout > 0 {
+		if errDeadline := conn.SetDeadline(time.Now().Add(t.connectTimeout)); errDeadline != nil {
+			_ = conn.Close()
+			return nil, errDeadline
+		}
+	}
 
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
@@ -110,6 +123,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
+	}
+	if t.connectTimeout > 0 {
+		if errClear := conn.SetDeadline(time.Time{}); errClear != nil {
+			_ = tlsConn.Close()
+			return nil, errClear
+		}
 	}
 
 	tr := &http2.Transport{}

@@ -20,26 +20,32 @@ import (
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	pending     map[string]*sync.Cond
-	dialer      proxy.Dialer
+	mu             sync.Mutex
+	connections    map[string]*http2.ClientConn
+	pending        map[string]*sync.Cond
+	dialer         proxy.Dialer
+	connectTimeout time.Duration
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, connectTimeout time.Duration) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
+	effectiveConnectTimeout := time.Duration(0)
 	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		proxyDialer, mode, errBuild := proxyutil.BuildDialerWithTimeout(proxyURL, connectTimeout)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				effectiveConnectTimeout = connectTimeout
+			}
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+		connections:    make(map[string]*http2.ClientConn),
+		pending:        make(map[string]*sync.Cond),
+		dialer:         dialer,
+		connectTimeout: effectiveConnectTimeout,
 	}
 }
 
@@ -84,6 +90,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	if err != nil {
 		return nil, err
 	}
+	if t.connectTimeout > 0 {
+		if errDeadline := conn.SetDeadline(time.Now().Add(t.connectTimeout)); errDeadline != nil {
+			_ = conn.Close()
+			return nil, errDeadline
+		}
+	}
 
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
@@ -91,6 +103,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
+	}
+	if t.connectTimeout > 0 {
+		if errClear := conn.SetDeadline(time.Time{}); errClear != nil {
+			_ = tlsConn.Close()
+			return nil, errClear
+		}
 	}
 
 	tr := &http2.Transport{}
@@ -163,16 +181,20 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	if proxyURL == "" && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
 
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL, connectTimeout)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+		if transport := buildProxyTransport(proxyURL, connectTimeout); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
