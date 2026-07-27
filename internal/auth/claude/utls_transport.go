@@ -166,7 +166,8 @@ func claudeOAuthTLSClientHelloSpec() *tls.ClientHelloSpec {
 // profile while retaining net/http proxy, cancellation, response parsing and
 // connection lifecycle semantics.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer         proxy.Dialer
+	connectTimeout time.Duration
 	// sessionCache is shared by every transport built for the same proxy, so
 	// short-lived ClaudeAuth instances can still resume, while resumption never
 	// crosses proxy boundaries.
@@ -177,19 +178,24 @@ type utlsRoundTripper struct {
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	var proxyURL string
+	var connectTimeout time.Duration
 	if cfg != nil {
 		proxyURL = cfg.ProxyURL
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+		proxyDialer, mode, errBuild := proxyutil.BuildDialerWithTimeout(cfg.ProxyURL, cfg.ProxyConnectTimeout())
 		if errBuild != nil {
 			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				connectTimeout = cfg.ProxyConnectTimeout()
+			}
 		}
 	}
 
 	roundTripper := &utlsRoundTripper{
-		dialer:       dialer,
-		sessionCache: claudeOAuthSessionCache(proxyURL),
+		dialer:         dialer,
+		connectTimeout: connectTimeout,
+		sessionCache:   claudeOAuthSessionCache(proxyURL),
 	}
 	roundTripper.transport = &http.Transport{
 		ForceAttemptHTTP2: false,
@@ -227,9 +233,14 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 		return nil, fmt.Errorf("claude oauth tls: apply ClientHello: %w", errPreset)
 	}
 	handshakeCtx := ctx
+	if t.connectTimeout > 0 {
+		var cancelConnect context.CancelFunc
+		handshakeCtx, cancelConnect = context.WithTimeout(handshakeCtx, t.connectTimeout)
+		defer cancelConnect()
+	}
 	if handshakeTimeout, _ := ctx.Value(claudeRefreshHandshakeTimeoutContextKey{}).(time.Duration); handshakeTimeout > 0 {
 		var cancelHandshake context.CancelFunc
-		handshakeCtx, cancelHandshake = context.WithTimeout(ctx, handshakeTimeout)
+		handshakeCtx, cancelHandshake = context.WithTimeout(handshakeCtx, handshakeTimeout)
 		defer cancelHandshake()
 	}
 	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
