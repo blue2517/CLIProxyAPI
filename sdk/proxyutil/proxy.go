@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -88,6 +89,13 @@ func NewDirectTransport() *http.Transport {
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
+	return BuildHTTPTransportWithTimeout(raw, 0)
+}
+
+// BuildHTTPTransportWithTimeout constructs an HTTP transport that bounds only
+// proxy connection establishment. A non-positive timeout preserves legacy
+// transport behavior.
+func BuildHTTPTransportWithTimeout(raw string, timeout time.Duration) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
@@ -112,13 +120,18 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
-			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+			boundedDialer := &timeoutDialer{dialer: dialer, timeout: timeout}
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return boundedDialer.DialContext(ctx, network, addr)
 			}
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
 		transport.Proxy = http.ProxyURL(setting.URL)
+		if timeout > 0 {
+			transport.DialContext = (&net.Dialer{Timeout: timeout}).DialContext
+			transport.TLSHandshakeTimeout = timeout
+		}
 		return transport, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
@@ -127,6 +140,13 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
 func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
+	return BuildDialerWithTimeout(raw, 0)
+}
+
+// BuildDialerWithTimeout constructs a proxy dialer that bounds dial, proxy TLS,
+// and HTTP CONNECT. The derived context is stopped before a ready connection is
+// returned, so later reads and writes are not time-bounded.
+func BuildDialerWithTimeout(raw string, timeout time.Duration) (proxy.Dialer, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
@@ -139,11 +159,14 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
-			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct}, setting.Mode, nil
+			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct, timeout: timeout}, setting.Mode, nil
 		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
+		}
+		if timeout > 0 {
+			return &timeoutDialer{dialer: dialer, timeout: timeout}, setting.Mode, nil
 		}
 		return dialer, setting.Mode, nil
 	default:
@@ -151,9 +174,29 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	}
 }
 
+type timeoutDialer struct {
+	dialer  proxy.Dialer
+	timeout time.Duration
+}
+
+func (d *timeoutDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+func (d *timeoutDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	ctx, cancel := proxyConnectContext(ctx, d.timeout)
+	defer cancel()
+	contextDialer, ok := d.dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, errors.New("proxy dialer does not support context cancellation")
+	}
+	return contextDialer.DialContext(ctx, network, addr)
+}
+
 type httpConnectDialer struct {
 	proxyURL *url.URL
 	dialer   proxy.Dialer
+	timeout  time.Duration
 }
 
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
@@ -161,9 +204,8 @@ func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 }
 
 func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, cancel := proxyConnectContext(ctx, d.timeout)
+	defer cancel()
 	contextDialer, ok := d.dialer.(proxy.ContextDialer)
 	if !ok {
 		return nil, errors.New("HTTP proxy base dialer does not support context cancellation")
@@ -239,6 +281,16 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	}
 	return conn, nil
+}
+
+func proxyConnectContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func proxyDialAddr(proxyURL *url.URL) string {

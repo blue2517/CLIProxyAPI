@@ -344,6 +344,117 @@ func TestBuildDialerHTTPProxyCONNECTCancellation(t *testing.T) {
 	}
 }
 
+func TestBuildDialerWithTimeoutHangingProxyFailsFast(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() {
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("listener.Close returned error: %v", errClose)
+		}
+	}()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = http.ReadRequest(bufio.NewReader(conn))
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	const connectTimeout = 200 * time.Millisecond
+	dialer, _, errBuild := BuildDialerWithTimeout("http://"+listener.Addr().String(), connectTimeout)
+	if errBuild != nil {
+		t.Fatalf("BuildDialerWithTimeout returned error: %v", errBuild)
+	}
+
+	start := time.Now()
+	conn, errDial := dialer.Dial("tcp", "target.example.com:443")
+	elapsed := time.Since(start)
+	if errDial == nil {
+		_ = conn.Close()
+		t.Fatal("expected hanging CONNECT to time out")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("dial took %v, want failure near %v", elapsed, connectTimeout)
+	}
+	<-serverDone
+}
+
+func TestBuildDialerWithTimeoutDoesNotBoundEstablishedReads(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() {
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("listener.Close returned error: %v", errClose)
+		}
+	}()
+
+	const connectTimeout = 200 * time.Millisecond
+	const responseDelay = 500 * time.Millisecond
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverDone <- errAccept
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, errRead := http.ReadRequest(bufio.NewReader(conn))
+		if errRead != nil {
+			serverDone <- fmt.Errorf("read CONNECT request failed: %w", errRead)
+			return
+		}
+		if req.Method != http.MethodConnect {
+			serverDone <- fmt.Errorf("method = %s, want CONNECT", req.Method)
+			return
+		}
+		if _, errWrite := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			serverDone <- fmt.Errorf("write CONNECT response failed: %w", errWrite)
+			return
+		}
+		time.Sleep(responseDelay)
+		if _, errWrite := io.WriteString(conn, "late"); errWrite != nil {
+			serverDone <- fmt.Errorf("write delayed payload failed: %w", errWrite)
+			return
+		}
+		serverDone <- nil
+	}()
+
+	dialer, _, errBuild := BuildDialerWithTimeout("http://"+listener.Addr().String(), connectTimeout)
+	if errBuild != nil {
+		t.Fatalf("BuildDialerWithTimeout returned error: %v", errBuild)
+	}
+	conn, errDial := dialer.Dial("tcp", "target.example.com:443")
+	if errDial != nil {
+		t.Fatalf("dialer.Dial returned error: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	buf := make([]byte, 4)
+	n, errRead := io.ReadFull(conn, buf)
+	if errRead != nil {
+		t.Fatalf("read established tunnel after %d bytes: %v", n, errRead)
+	}
+	if string(buf) != "late" {
+		t.Fatalf("payload = %q, want late", string(buf))
+	}
+	if errServer := <-serverDone; errServer != nil {
+		t.Fatalf("proxy server returned error: %v", errServer)
+	}
+}
+
 func TestRedactProxyURL(t *testing.T) {
 	t.Parallel()
 

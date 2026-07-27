@@ -26,7 +26,8 @@ import (
 // providers that require a browser-like TLS and HTTP/2 transport. Each request
 // gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer         proxy.Dialer
+	connectTimeout time.Duration
 }
 
 type closeConnectionBody struct {
@@ -54,17 +55,24 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, connectTimeout time.Duration) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
+	var effectiveConnectTimeout time.Duration
 	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		proxyDialer, mode, errBuild := proxyutil.BuildDialerWithTimeout(proxyURL, connectTimeout)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				effectiveConnectTimeout = connectTimeout
+			}
 		}
 	}
-	return &utlsRoundTripper{dialer: dialer}
+	return &utlsRoundTripper{
+		dialer:         dialer,
+		connectTimeout: effectiveConnectTimeout,
+	}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
@@ -75,6 +83,12 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
 	if errDial != nil {
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
+	}
+	if t.connectTimeout > 0 {
+		if errDeadline := conn.SetDeadline(time.Now().Add(t.connectTimeout)); errDeadline != nil {
+			_ = conn.Close()
+			return nil, errDeadline
+		}
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
@@ -88,6 +102,12 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
 		}
 		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+	}
+	if t.connectTimeout > 0 {
+		if errClear := conn.SetDeadline(time.Time{}); errClear != nil {
+			_ = tlsConn.Close()
+			return nil, errClear
+		}
 	}
 
 	tr := &http2.Transport{}
@@ -217,9 +237,14 @@ func claudeCodeTLSClientHelloSpec() *tls.ClientHelloSpec {
 
 const claudeCodeRoundTripperCacheCapacity = 64
 
-var claudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
+type claudeCodeRoundTripperCacheKey struct {
+	proxyURL       string
+	connectTimeout time.Duration
+}
+
+var claudeCodeRoundTripperCache = internalcache.NewBoundedLRU[claudeCodeRoundTripperCacheKey, http.RoundTripper](
 	claudeCodeRoundTripperCacheCapacity,
-	func(_ string, roundTripper http.RoundTripper) {
+	func(_ claudeCodeRoundTripperCacheKey, roundTripper http.RoundTripper) {
 		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
 			transport.CloseIdleConnections()
 		}
@@ -283,22 +308,35 @@ func claudeCodeRequestHeaderOrder(_, requestTarget string) []string {
 }
 
 func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	return claudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
-		return newClaudeCodeRoundTripper(proxyURL)
+	return cachedClaudeCodeRoundTripperWithTimeout(proxyURL, config.DefaultProxyConnectTimeout)
+}
+
+func cachedClaudeCodeRoundTripperWithTimeout(proxyURL string, connectTimeout time.Duration) http.RoundTripper {
+	key := claudeCodeRoundTripperCacheKey{proxyURL: proxyURL, connectTimeout: connectTimeout}
+	return claudeCodeRoundTripperCache.GetOrAdd(key, func() http.RoundTripper {
+		return newClaudeCodeRoundTripperWithTimeout(proxyURL, connectTimeout)
 	})
 }
 
 func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	// The cache is scoped to this round tripper, which is already keyed by proxy,
-	// so resumption never crosses proxy boundaries.
+	return newClaudeCodeRoundTripperWithTimeout(proxyURL, config.DefaultProxyConnectTimeout)
+}
+
+func newClaudeCodeRoundTripperWithTimeout(proxyURL string, connectTimeout time.Duration) http.RoundTripper {
+	// The cache is scoped to this round tripper, which is already keyed by proxy
+	// and connection timeout, so resumption never crosses proxy boundaries.
 	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
 	var dialer proxy.Dialer = proxy.Direct
+	var effectiveConnectTimeout time.Duration
 	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		proxyDialer, mode, errBuild := proxyutil.BuildDialerWithTimeout(proxyURL, connectTimeout)
 		if errBuild != nil {
 			log.Errorf("claude tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				effectiveConnectTimeout = connectTimeout
+			}
 		}
 	}
 
@@ -332,7 +370,13 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 				}
 				return nil, fmt.Errorf("claude tls: apply Claude Code ClientHello: %w", errPreset)
 			}
-			if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			handshakeCtx := ctx
+			if effectiveConnectTimeout > 0 {
+				var cancelHandshake context.CancelFunc
+				handshakeCtx, cancelHandshake = context.WithTimeout(ctx, effectiveConnectTimeout)
+				defer cancelHandshake()
+			}
+			if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
 				if errClose := tlsConn.Close(); errClose != nil {
 					log.Debugf("claude tls: close connection after handshake failure: %v", errClose)
 				}
@@ -374,17 +418,21 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	if proxyURL == "" && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
 
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
-	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL, connectTimeout)
+	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripperWithTimeout(proxyURL, connectTimeout)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+		if transport := buildProxyTransport(proxyURL, connectTimeout); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
