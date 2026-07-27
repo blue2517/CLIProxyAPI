@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	latestReleaseURL       = "https://api.github.com/repos/blue2517/CLIProxyAPI/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPI"
 )
 
