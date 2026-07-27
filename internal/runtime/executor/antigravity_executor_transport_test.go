@@ -287,12 +287,32 @@ func TestAntigravityConcurrentRequestsReusePooledConnections(t *testing.T) {
 // TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo verifies that when pooling is enabled
 // without specifying max-idle-conns-per-host, it defaults to 2 (matching Go's default and official agy).
 func TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo(t *testing.T) {
+	const (
+		waves      = 3
+		perWave    = 8
+		totalConns = waves * perWave
+	)
 	var mu sync.Mutex
 	remotes := map[string]struct{}{}
+	arrivals := 0
+	barrier := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		remotes[r.RemoteAddr] = struct{}{}
+		currentBarrier := barrier
+		arrivals++
+		if arrivals == perWave {
+			close(barrier)
+			barrier = make(chan struct{})
+			arrivals = 0
+		}
 		mu.Unlock()
+		// Hold responses until every request in the wave owns a connection.
+		select {
+		case <-currentBarrier:
+		case <-r.Context().Done():
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -308,11 +328,6 @@ func TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo(t *testing.T) {
 	}
 	client := &http.Client{Transport: antigravityHTTP11Transport(auth, http.DefaultTransport.(*http.Transport), poolCfg)}
 
-	const (
-		waves      = 3
-		perWave    = 8
-		totalConns = waves * perWave
-	)
 	for wave := 0; wave < waves; wave++ {
 		start := make(chan struct{})
 		var wg sync.WaitGroup

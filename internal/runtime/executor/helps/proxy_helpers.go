@@ -34,12 +34,15 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority: request override, then auth.ProxyURL, then cfg.ProxyURL.
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport := buildProxyTransport(proxyURL, connectTimeout)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
@@ -88,10 +91,15 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
-	tr, err := devinTransportCache.Get(proxyURL, func() (*http.Transport, error) {
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
+	cacheKey := fmt.Sprintf("proxy:%s;connect:%d", proxyURL, connectTimeout)
+	tr, err := devinTransportCache.Get(cacheKey, func() (*http.Transport, error) {
 		var base *http.Transport
 		if proxyURL != "" {
-			base = buildProxyTransport(proxyURL)
+			base = buildProxyTransport(proxyURL, connectTimeout)
 		}
 		if base == nil {
 			if dt, ok := http.DefaultTransport.(*http.Transport); ok {
@@ -144,11 +152,12 @@ func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyau
 //
 // Parameters:
 //   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
+//   - connectTimeout: Maximum time for proxy connection establishment
 //
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+func buildProxyTransport(proxyURL string, connectTimeout time.Duration) *http.Transport {
+	transport, _, errBuild := proxyutil.BuildHTTPTransportWithTimeout(proxyURL, connectTimeout)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil
