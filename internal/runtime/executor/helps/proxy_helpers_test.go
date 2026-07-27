@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -117,4 +118,50 @@ type roundTripperFunc func(req *http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestNewProxyAwareHTTPClientAppliesProxyConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewProxyAwareHTTPClient(
+		context.Background(),
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{
+			ProxyURL:                   "https://proxy.example.com:8443",
+			ProxyConnectTimeoutSeconds: 17,
+		}},
+		nil,
+		0,
+	)
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.TLSHandshakeTimeout != 17*time.Second {
+		t.Fatalf("TLSHandshakeTimeout = %v, want 17s", transport.TLSHandshakeTimeout)
+	}
+}
+
+func TestNewDevinHTTPClientProxyTimeoutScopesTransportCache(t *testing.T) {
+	ctx := coreexecutor.WithRequestProxyURL(context.Background(), "http://request-proxy.example:8081")
+	firstConfig := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyConnectTimeoutSeconds: 17}}
+	secondConfig := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyConnectTimeoutSeconds: 23}}
+	first := NewDevinHTTPClient(ctx, firstConfig, nil, 0)
+	again := NewDevinHTTPClient(ctx, firstConfig, nil, 0)
+	second := NewDevinHTTPClient(ctx, secondConfig, nil, 0)
+	if first.Transport != again.Transport || first.Transport == second.Transport {
+		t.Fatal("Devin transport cache must include the connection timeout")
+	}
+	tr, ok := second.Transport.(*http.Transport)
+	if !ok || tr.TLSHandshakeTimeout != 23*time.Second {
+		t.Fatalf("transport = %#v, want 23s handshake timeout", second.Transport)
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://upstream.example/", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	proxyURL, errProxy := tr.Proxy(req)
+	if errProxy != nil || proxyURL.String() != "http://request-proxy.example:8081" {
+		t.Fatalf("proxy = %v, error = %v", proxyURL, errProxy)
+	}
 }

@@ -225,6 +225,7 @@ func closeAntigravityAuthIdleTransports(auth *cliproxyauth.Auth) {
 type antigravityTransportKey struct {
 	credential          string
 	proxy               string
+	connectTimeout      time.Duration
 	base                *http.Transport
 	shortMode           bool
 	idleConnTimeout     time.Duration
@@ -360,15 +361,20 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string,
 		cfg = cfgs[0]
 	}
 	settings := resolveAntigravityPoolSettings(cfg)
+	connectTimeout := config.DefaultProxyConnectTimeout
+	if cfg != nil {
+		connectTimeout = cfg.ProxyConnectTimeout()
+	}
 	key := antigravityTransportKey{
 		credential:          antigravityTransportScope(auth),
 		proxy:               proxyURL,
+		connectTimeout:      connectTimeout,
 		shortMode:           settings.shortMode,
 		idleConnTimeout:     settings.idleConnTimeout,
 		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
-		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+		base, _, errBuild := proxyutil.BuildHTTPTransportWithTimeout(proxyURL, connectTimeout)
 		if errBuild != nil {
 			return nil, errBuild
 		}
