@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -308,6 +309,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
 				}
 			}
+		}
+		if includeThoughts, active := thinking.ClaudeThinkingIncludesContent(rawJSON); active {
+			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
