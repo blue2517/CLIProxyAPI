@@ -2290,11 +2290,39 @@ func TestConvertClaudeRequestToAntigravity_ThinkingConfig(t *testing.T) {
 		if thinkingConfig.Get("thinkingBudget").Int() != 8000 {
 			t.Errorf("Expected thinkingBudget 8000, got %d", thinkingConfig.Get("thinkingBudget").Int())
 		}
-		if thinkingConfig.Get("includeThoughts").Exists() {
-			t.Error("includeThoughts should be absent without explicit Claude display intent")
+		if !thinkingConfig.Get("includeThoughts").Bool() {
+			t.Error("includeThoughts should be true for active Claude thinking")
 		}
 	} else {
 		t.Log("thinkingConfig not present - model may not be registered in test registry")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ThinkingVisibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		thinking   string
+		want       bool
+		wantExists bool
+	}{
+		{name: "adaptive includes thoughts", thinking: `{"type":"adaptive"}`, want: true, wantExists: true},
+		{name: "enabled includes thoughts", thinking: `{"type":"enabled","budget_tokens":8192}`, want: true, wantExists: true},
+		{name: "omitted display hides thoughts", thinking: `{"type":"adaptive","display":"omitted"}`, wantExists: true},
+		{name: "disabled removes thinking config", thinking: `{"type":"disabled"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"user","content":"hi"}],"thinking":` + test.thinking + `}`)
+			output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", input, true)
+			includeThoughts := gjson.GetBytes(output, "request.generationConfig.thinkingConfig.includeThoughts")
+			if includeThoughts.Exists() != test.wantExists || (test.wantExists && includeThoughts.Bool() != test.want) {
+				t.Fatalf("includeThoughts = %s, want exists=%v value=%v; output=%s", includeThoughts.Raw, test.wantExists, test.want, output)
+			}
+			if !test.wantExists && gjson.GetBytes(output, "request.generationConfig.thinkingConfig").Exists() {
+				t.Fatalf("disabled thinking retained thinkingConfig: %s", output)
+			}
+		})
 	}
 }
 
