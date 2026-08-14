@@ -7,9 +7,10 @@ import (
 )
 
 // ClaudeThinkingIncludesContent reports whether an active Claude thinking
-// request should ask Google-compatible upstreams to return thought text.
+// request should ask upstreams (such as Google or Codex) to return thought text.
 // Explicit display="omitted" remains authoritative; otherwise active thinking
-// includes its content because Google hides it unless includeThoughts is true.
+// includes its content because upstreams hide it unless includeThoughts or
+// reasoning.summary is set.
 func ClaudeThinkingIncludesContent(body []byte) (bool, bool) {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return false, false

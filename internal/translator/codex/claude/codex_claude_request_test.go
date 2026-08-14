@@ -710,3 +710,105 @@ func validCodexReasoningSignature() string {
 	raw[8] = 1
 	return base64.URLEncoding.EncodeToString(raw)
 }
+
+func TestConvertClaudeRequestToCodex_ReasoningSummary(t *testing.T) {
+	tests := []struct {
+		name        string
+		inputJSON   string
+		wantEffort  string
+		wantSummary string
+		hasSummary  bool
+	}{
+		{
+			name: "Adaptive thinking defaults to xhigh and detailed summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "adaptive"},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort:  "xhigh",
+			wantSummary: "detailed",
+			hasSummary:  true,
+		},
+		{
+			name: "Adaptive thinking with explicit effort passes through effort and sets detailed summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "adaptive"},
+				"output_config": {"effort": "high"},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort:  "high",
+			wantSummary: "detailed",
+			hasSummary:  true,
+		},
+		{
+			name: "Enabled thinking with positive budget converts budget and sets detailed summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "enabled", "budget_tokens": 4096},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort:  "medium",
+			wantSummary: "detailed",
+			hasSummary:  true,
+		},
+		{
+			name: "Adaptive thinking with display omitted does not set summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "adaptive", "display": "omitted"},
+				"output_config": {"effort": "high"},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort: "high",
+			hasSummary: false,
+		},
+		{
+			name: "Disabled thinking does not set summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "disabled"},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort: "none",
+			hasSummary: false,
+		},
+		{
+			name: "Zero budget tokens does not set summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"thinking": {"type": "enabled", "budget_tokens": 0},
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort: "none",
+			hasSummary: false,
+		},
+		{
+			name: "Request without thinking block defaults effort and does not set summary",
+			inputJSON: `{
+				"model": "gpt-5.4",
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantEffort: "medium",
+			hasSummary: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(tt.inputJSON), true)
+			effort := gjson.GetBytes(result, "reasoning.effort").String()
+			if effort != tt.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; output=%s", effort, tt.wantEffort, result)
+			}
+			summaryResult := gjson.GetBytes(result, "reasoning.summary")
+			if summaryResult.Exists() != tt.hasSummary {
+				t.Fatalf("reasoning.summary exists = %v, want %v; output=%s", summaryResult.Exists(), tt.hasSummary, result)
+			}
+			if tt.hasSummary && summaryResult.String() != tt.wantSummary {
+				t.Fatalf("reasoning.summary = %q, want %q; output=%s", summaryResult.String(), tt.wantSummary, result)
+			}
+		})
+	}
+}
