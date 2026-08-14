@@ -1288,3 +1288,39 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchemaForGemini_RemovesEncryptedMetadataField(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"message": {
+				"type": "string",
+				"description": "Message text to send",
+				"encrypted": true
+			},
+			"encrypted": {
+				"type": "boolean",
+				"description": "Whether something is encrypted"
+			}
+		},
+		"required": ["message"]
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"message": {
+				"type": "string",
+				"description": "Message text to send"
+			},
+			"encrypted": {
+				"type": "boolean",
+				"description": "Whether something is encrypted"
+			}
+		},
+		"required": ["message"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}

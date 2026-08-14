@@ -36,7 +36,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert input messages to Gemini contents format
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(input.Array())
+		customNormalized := normalizeOpenAIResponsesCustomToolItems(input.Array())
+		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(customNormalized)
 		if hasGeminiCarrier {
 			useGeminiNativeReasoningLayout = true
 		}
@@ -312,33 +313,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	}
 
 	// Convert tools to Gemini functionDeclarations format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var functionDeclarations [][]byte
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
-
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name.String()))
-				}
-				if desc := tool.Get("description"); desc.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
-				}
-				if params := tool.Get("parameters"); params.Exists() {
-					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(util.CleanJSONSchemaForGemini(params.Raw)))
-				}
-
-				functionDeclarations = append(functionDeclarations, funcDecl)
-			}
-			return true
-		})
-
-		// Only add tools if there are function declarations.
-		if len(functionDeclarations) > 0 {
-			geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-			geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
-			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
-		}
+	if functionDeclarations := buildGeminiResponsesFunctionDeclarations(root); len(functionDeclarations) > 0 {
+		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
+		geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
+		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
 	}
 
 	// Handle generation config from OpenAI format
@@ -712,6 +690,58 @@ func buildOpenAIResponsesFunctionCallPart(item gjson.Result, signature string) [
 	return functionCall
 }
 
+func extractOpenAIResponsesOutputText(outputResult gjson.Result) string {
+	if !outputResult.Exists() || outputResult.Type == gjson.Null {
+		return ""
+	}
+	if outputResult.Type == gjson.String {
+		str := outputResult.String()
+		if strings.HasPrefix(str, `"`) && strings.HasSuffix(str, `"`) && len(str) >= 2 {
+			var unquoted string
+			if err := json.Unmarshal([]byte(str), &unquoted); err == nil {
+				return unquoted
+			}
+		}
+		return str
+	}
+	if outputResult.IsArray() {
+		texts := make([]string, 0, len(outputResult.Array()))
+		for _, elem := range outputResult.Array() {
+			if elem.Type == gjson.String {
+				texts = append(texts, elem.String())
+			} else if elem.IsObject() {
+				if t := elem.Get("text"); t.Exists() {
+					texts = append(texts, t.String())
+				} else {
+					texts = append(texts, elem.Raw)
+				}
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return outputResult.Raw
+}
+
+func mergeOpenAIResponsesFunctionOutputs(items []gjson.Result) gjson.Result {
+	if len(items) == 0 {
+		return gjson.Result{}
+	}
+	if len(items) == 1 {
+		return items[0]
+	}
+	combinedTexts := make([]string, 0, len(items))
+	for _, it := range items {
+		txt := extractOpenAIResponsesOutputText(it.Get("output"))
+		if strings.TrimSpace(txt) != "" {
+			combinedTexts = append(combinedTexts, txt)
+		}
+	}
+	joined := strings.Join(combinedTexts, "\n\n")
+	first := []byte(items[0].Raw)
+	first, _ = sjson.SetBytes(first, "output", joined)
+	return gjson.ParseBytes(first)
+}
+
 func buildOpenAIResponsesFunctionResponsePart(item gjson.Result, functionNamesByCallID map[string]string) []byte {
 	callID := item.Get("call_id").String()
 	functionName := "unknown"
@@ -722,13 +752,23 @@ func buildOpenAIResponsesFunctionResponsePart(item gjson.Result, functionNamesBy
 	functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.name", util.SanitizeFunctionName(functionName))
 	functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.id", callID)
 
-	outputRaw := item.Get("output").Str
-	if outputRaw != "" && outputRaw != "null" {
-		output := gjson.Parse(outputRaw)
-		if output.Type == gjson.JSON && json.Valid([]byte(output.Raw)) {
-			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(output.Raw))
+	outputResult := item.Get("output")
+	if outputResult.Exists() && outputResult.Type != gjson.Null {
+		if outputResult.Type == gjson.String {
+			outputRaw := outputResult.String()
+			outputParsed := gjson.Parse(outputRaw)
+			if outputParsed.Type == gjson.JSON && json.Valid([]byte(outputParsed.Raw)) {
+				functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(outputParsed.Raw))
+			} else {
+				functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputRaw)
+			}
+		} else if outputResult.IsArray() {
+			text := extractOpenAIResponsesOutputText(outputResult)
+			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", text)
+		} else if outputResult.IsObject() {
+			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(outputResult.Raw))
 		} else {
-			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputRaw)
+			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputResult.Raw)
 		}
 	}
 	return functionResponse
@@ -749,12 +789,41 @@ func collectOpenAIResponsesFunctionCallOutputs(items []gjson.Result, start int, 
 }
 
 func orderOpenAIResponsesFunctionCallOutputs(outputs []gjson.Result, pendingCallIDs []string) ([]gjson.Result, []string) {
-	ordered := make([]gjson.Result, 0, len(outputs))
-	used := make([]bool, len(outputs))
+	if len(outputs) == 0 {
+		return nil, pendingCallIDs
+	}
+
+	type callGroup struct {
+		callID string
+		items  []gjson.Result
+	}
+	groups := make([]callGroup, 0, len(outputs))
+	groupMap := make(map[string]int)
+
+	for _, output := range outputs {
+		callID := strings.TrimSpace(output.Get("call_id").String())
+		if idx, exists := groupMap[callID]; exists {
+			groups[idx].items = append(groups[idx].items, output)
+		} else {
+			groupMap[callID] = len(groups)
+			groups = append(groups, callGroup{
+				callID: callID,
+				items:  []gjson.Result{output},
+			})
+		}
+	}
+
+	mergedOutputs := make([]gjson.Result, 0, len(groups))
+	for _, g := range groups {
+		mergedOutputs = append(mergedOutputs, mergeOpenAIResponsesFunctionOutputs(g.items))
+	}
+
+	ordered := make([]gjson.Result, 0, len(mergedOutputs))
+	used := make([]bool, len(mergedOutputs))
 	remainingPending := make([]string, 0, len(pendingCallIDs))
 	for _, pendingID := range pendingCallIDs {
 		match := -1
-		for outputIndex, output := range outputs {
+		for outputIndex, output := range mergedOutputs {
 			if !used[outputIndex] && output.Get("call_id").String() == pendingID {
 				match = outputIndex
 				break
@@ -765,9 +834,9 @@ func orderOpenAIResponsesFunctionCallOutputs(outputs []gjson.Result, pendingCall
 			continue
 		}
 		used[match] = true
-		ordered = append(ordered, outputs[match])
+		ordered = append(ordered, mergedOutputs[match])
 	}
-	for outputIndex, output := range outputs {
+	for outputIndex, output := range mergedOutputs {
 		if !used[outputIndex] {
 			ordered = append(ordered, output)
 		}

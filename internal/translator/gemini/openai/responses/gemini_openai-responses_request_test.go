@@ -1061,3 +1061,293 @@ func validResponsesGPTReasoningSignature() string {
 	}
 	return base64.URLEncoding.EncodeToString(raw)
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_AdditionalToolsAndCustomTools(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": [
+					{
+						"type": "custom",
+						"name": "exec",
+						"description": "Run JS in V8",
+						"format": {
+							"type": "grammar",
+							"syntax": "lark"
+						}
+					},
+					{
+						"type": "namespace",
+						"name": "collaboration",
+						"tools": [
+							{
+								"type": "function",
+								"name": "send_message",
+								"description": "Send msg",
+								"parameters": {
+									"type": "object",
+									"properties": {
+										"target": {"type": "string"}
+									},
+									"required": ["target"]
+								}
+							}
+						]
+					}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "hello"}]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	decls := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("functionDeclarations len = %d, want 2. Output: %s", len(decls), output)
+	}
+
+	execDecl := decls[0]
+	if got := execDecl.Get("name").String(); got != "exec" {
+		t.Fatalf("exec name = %q, want exec", got)
+	}
+	if got := execDecl.Get("description").String(); got != "Run JS in V8" {
+		t.Fatalf("exec description = %q, want Run JS in V8", got)
+	}
+	if got := execDecl.Get("parametersJsonSchema.properties.input.type").String(); got != "string" {
+		t.Fatalf("exec parameters schema input type = %q, want string", got)
+	}
+
+	collabDecl := decls[1]
+	if got := collabDecl.Get("name").String(); got != "send_message" {
+		t.Fatalf("collaboration send_message name = %q, want send_message", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_CustomToolCallAndOutputReplay(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "solve problem"}]
+			},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_exec_123",
+				"name": "exec",
+				"input": "console.log('hi')"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_exec_123",
+				"output": "hi\n"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents len = %d, want 3. Output: %s", len(contents), output)
+	}
+
+	// Model tool call
+	modelParts := contents[1].Get("parts").Array()
+	if len(modelParts) != 1 {
+		t.Fatalf("model parts len = %d, want 1", len(modelParts))
+	}
+	fc := modelParts[0].Get("functionCall")
+	if !fc.Exists() {
+		t.Fatalf("expected functionCall part in model content: %s", contents[1].Raw)
+	}
+	if got := fc.Get("name").String(); got != "exec" {
+		t.Fatalf("functionCall name = %q, want exec", got)
+	}
+	if got := fc.Get("args.input").String(); got != "console.log('hi')" {
+		t.Fatalf("functionCall args.input = %q, want console.log('hi')", got)
+	}
+
+	// User tool response
+	userParts := contents[2].Get("parts").Array()
+	if len(userParts) != 1 {
+		t.Fatalf("user response parts len = %d, want 1", len(userParts))
+	}
+	fr := userParts[0].Get("functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse part in user content: %s", contents[2].Raw)
+	}
+	if got := fr.Get("name").String(); got != "exec" {
+		t.Fatalf("functionResponse name = %q, want exec", got)
+	}
+	if got := fr.Get("id").String(); got != "call_exec_123" {
+		t.Fatalf("functionResponse id = %q, want call_exec_123", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_StripsEncryptedFromAdditionalTools(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "followup_task",
+						"description": "Send a follow-up task",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"message": {
+									"type": "string",
+									"description": "Message text",
+									"encrypted": true
+								},
+								"target": {
+									"type": "string",
+									"description": "Target agent"
+								}
+							},
+							"required": ["target", "message"]
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	decls := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+	if len(decls) != 1 {
+		t.Fatalf("functionDeclarations len = %d, want 1", len(decls))
+	}
+
+	schema := decls[0].Get("parametersJsonSchema").Raw
+	if strings.Contains(schema, `"encrypted"`) {
+		t.Fatalf("encrypted metadata survived in parametersJsonSchema: %s", schema)
+	}
+	if decls[0].Get("parametersJsonSchema.properties.message.type").String() != "string" {
+		t.Fatalf("message parameter missing or wrong type: %s", schema)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MultipleCustomToolCallOutputs(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "custom_tool_call",
+				"name": "exec",
+				"call_id": "call_123",
+				"input": "notify('a'); return 'b';"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_123",
+				"output": "notify output a"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_123",
+				"output": "final output b"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	err := internalsignature.ValidateGeminiFunctionCallPairing(output)
+	if err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing error: %v\nOutput: %s", err, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MultiTurnMultipleOutputsRegression(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "custom_tool_call",
+				"name": "exec",
+				"call_id": "call_1",
+				"input": "notify('hello');"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "notify output 1"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "final output 1"
+			},
+			{
+				"type": "custom_tool_call",
+				"name": "exec",
+				"call_id": "call_2",
+				"input": "console.log('step2');"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_2",
+				"output": "output 2"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	err := internalsignature.ValidateGeminiFunctionCallPairing(output)
+	if err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing error: %v\nOutput: %s", err, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_FunctionsNamespaceBypassesPrefixing(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{
+								"type": "custom",
+								"name": "exec",
+								"description": "Run JS in V8"
+							},
+							{
+								"type": "function",
+								"name": "wait",
+								"description": "Wait on cell"
+							}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	decls := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("functionDeclarations len = %d, want 2. Output: %s", len(decls), output)
+	}
+	if got := decls[0].Get("name").String(); got != "exec" {
+		t.Fatalf("decls[0].name = %q, want exec (must not have functions__ prefix)", got)
+	}
+	if got := decls[1].Get("name").String(); got != "wait" {
+		t.Fatalf("decls[1].name = %q, want wait (must not have functions__ prefix)", got)
+	}
+}

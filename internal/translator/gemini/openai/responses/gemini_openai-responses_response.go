@@ -66,9 +66,12 @@ type geminiToResponsesState struct {
 	NextIndex        int
 	FuncArgsBuf      map[int]*strings.Builder
 	FuncNames        map[int]string
+	FuncNamespaces   map[int]string
+	FuncCustom       map[int]bool
 	FuncCallIDs      map[int]string
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
+	ToolRegistry     map[string]geminiResponsesToolIdentity
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -116,17 +119,21 @@ func emitEvent(event string, payload []byte) []byte {
 
 // ConvertGeminiResponseToOpenAIResponses converts Gemini SSE chunks into OpenAI Responses SSE events.
 func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	reqForRegistry := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if *param == nil {
 		*param = &geminiToResponsesState{
 			FuncArgsBuf:             make(map[int]*strings.Builder),
 			FuncNames:               make(map[int]string),
+			FuncNamespaces:          make(map[int]string),
+			FuncCustom:              make(map[int]bool),
 			FuncCallIDs:             make(map[int]string),
 			FuncDone:                make(map[int]bool),
 			DetachedReasoning:       make(map[int]geminiDetachedReasoningItem),
 			CompletedMessages:       make(map[int]geminiCompletedMessageItem),
 			CompletedReasoning:      make(map[int]geminiCompletedReasoningItem),
 			SeenReasoningSignatures: make(map[string]bool),
-			SanitizedNameMap:        util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMap:        util.SanitizedToolNameMap(reqForRegistry),
+			ToolRegistry:            geminiResponsesToolRegistry(reqForRegistry),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -135,6 +142,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.FuncNames == nil {
 		st.FuncNames = make(map[int]string)
+	}
+	if st.FuncNamespaces == nil {
+		st.FuncNamespaces = make(map[int]string)
+	}
+	if st.FuncCustom == nil {
+		st.FuncCustom = make(map[int]bool)
 	}
 	if st.FuncCallIDs == nil {
 		st.FuncCallIDs = make(map[int]string)
@@ -155,7 +168,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		st.SeenReasoningSignatures = make(map[string]bool)
 	}
 	if st.SanitizedNameMap == nil {
-		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+		st.SanitizedNameMap = util.SanitizedToolNameMap(reqForRegistry)
+	}
+	if st.ToolRegistry == nil {
+		st.ToolRegistry = geminiResponsesToolRegistry(reqForRegistry)
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -571,7 +587,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				finalizeReasoning()
 				finalizeMessage()
 				st.LastSemanticKind = geminiResponsesCarrierFunction
-				name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
+				rawFunctionName := fc.Get("name").String()
+				toolIdentity := resolveGeminiResponsesToolIdentity(st.ToolRegistry, st.SanitizedNameMap, rawFunctionName)
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
@@ -581,7 +598,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if st.FuncCallIDs[idx] == "" {
 					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				}
-				st.FuncNames[idx] = name
+				st.FuncNames[idx] = toolIdentity.name
+				st.FuncNamespaces[idx] = toolIdentity.namespace
+				st.FuncCustom[idx] = toolIdentity.custom
 
 				argsJSON := "{}"
 				if args := fc.Get("args"); args.Exists() {
@@ -591,45 +610,76 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					st.FuncArgsBuf[idx].WriteString(argsJSON)
 				}
 
-				// Emit item.added for function call
-				item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
-				item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-				item, _ = sjson.SetBytes(item, "output_index", idx)
-				item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-				item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
-				item, _ = sjson.SetBytes(item, "item.name", name)
-				out = append(out, emitEvent("response.output_item.added", item))
+				if toolIdentity.custom {
+					item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","input":"","call_id":"","name":""}}`)
+					item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+					item, _ = sjson.SetBytes(item, "output_index", idx)
+					item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
+					item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
+					item = applyGeminiResponsesToolIdentity(item, toolIdentity, "item")
+					out = append(out, emitEvent("response.output_item.added", item))
 
-				// Emit arguments delta (full args in one chunk).
-				// When Gemini omits args, emit "{}" to keep Responses streaming event order consistent.
-				if argsJSON != "" {
-					ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
-					ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
-					ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-					ad, _ = sjson.SetBytes(ad, "output_index", idx)
-					ad, _ = sjson.SetBytes(ad, "delta", argsJSON)
-					out = append(out, emitEvent("response.function_call_arguments.delta", ad))
-				}
+					if !st.FuncDone[idx] {
+						customInput := unwrapGeminiResponsesCustomToolInput(argsJSON)
+						inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+						inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
+						inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
+						inputDone, _ = sjson.SetBytes(inputDone, "output_index", idx)
+						inputDone, _ = sjson.SetBytes(inputDone, "input", customInput)
+						out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
 
-				// Gemini emits the full function call payload at once, so we can finalize it immediately.
-				if !st.FuncDone[idx] {
-					fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
-					fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
-					fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-					fcDone, _ = sjson.SetBytes(fcDone, "output_index", idx)
-					fcDone, _ = sjson.SetBytes(fcDone, "arguments", argsJSON)
-					out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
+						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
+						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
+						itemDone, _ = sjson.SetBytes(itemDone, "item.input", customInput)
+						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
+						itemDone = applyGeminiResponsesToolIdentity(itemDone, toolIdentity, "item")
+						out = append(out, emitEvent("response.output_item.done", itemDone))
 
-					itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
-					itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
-					itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
-					itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-					itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", argsJSON)
-					itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
-					itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
-					out = append(out, emitEvent("response.output_item.done", itemDone))
+						st.FuncDone[idx] = true
+					}
+				} else {
+					// Emit item.added for function call
+					item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
+					item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+					item, _ = sjson.SetBytes(item, "output_index", idx)
+					item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+					item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
+					item = applyGeminiResponsesToolIdentity(item, toolIdentity, "item")
+					out = append(out, emitEvent("response.output_item.added", item))
 
-					st.FuncDone[idx] = true
+					// Emit arguments delta (full args in one chunk).
+					// When Gemini omits args, emit "{}" to keep Responses streaming event order consistent.
+					if argsJSON != "" {
+						ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
+						ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
+						ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						ad, _ = sjson.SetBytes(ad, "output_index", idx)
+						ad, _ = sjson.SetBytes(ad, "delta", argsJSON)
+						out = append(out, emitEvent("response.function_call_arguments.delta", ad))
+					}
+
+					// Gemini emits the full function call payload at once, so we can finalize it immediately.
+					if !st.FuncDone[idx] {
+						fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
+						fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
+						fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						fcDone, _ = sjson.SetBytes(fcDone, "output_index", idx)
+						fcDone, _ = sjson.SetBytes(fcDone, "arguments", argsJSON)
+						out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
+
+						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
+						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", argsJSON)
+						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
+						itemDone = applyGeminiResponsesToolIdentity(itemDone, toolIdentity, "item")
+						out = append(out, emitEvent("response.output_item.done", itemDone))
+
+						st.FuncDone[idx] = true
+					}
 				}
 
 				return true
@@ -671,6 +721,33 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
 				}
+				toolIdentity := geminiResponsesToolIdentity{
+					name:      st.FuncNames[idx],
+					namespace: st.FuncNamespaces[idx],
+					custom:    st.FuncCustom[idx],
+				}
+				if toolIdentity.custom {
+					customInput := unwrapGeminiResponsesCustomToolInput(args)
+					inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+					inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
+					inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
+					inputDone, _ = sjson.SetBytes(inputDone, "output_index", idx)
+					inputDone, _ = sjson.SetBytes(inputDone, "input", customInput)
+					out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
+
+					itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
+					itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+					itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+					itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
+					itemDone, _ = sjson.SetBytes(itemDone, "item.input", customInput)
+					itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
+					itemDone = applyGeminiResponsesToolIdentity(itemDone, toolIdentity, "item")
+					out = append(out, emitEvent("response.output_item.done", itemDone))
+
+					st.FuncDone[idx] = true
+					continue
+				}
+
 				fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 				fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
 				fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
@@ -684,7 +761,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 				itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
-				itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+				itemDone = applyGeminiResponsesToolIdentity(itemDone, toolIdentity, "item")
 				out = append(out, emitEvent("response.output_item.done", itemDone))
 
 				st.FuncDone[idx] = true
@@ -794,11 +871,25 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
 				}
+				toolIdentity := geminiResponsesToolIdentity{
+					name:      st.FuncNames[idx],
+					namespace: st.FuncNamespaces[idx],
+					custom:    st.FuncCustom[idx],
+				}
+				if toolIdentity.custom {
+					item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
+					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+					item, _ = sjson.SetBytes(item, "input", unwrapGeminiResponsesCustomToolInput(args))
+					item, _ = sjson.SetBytes(item, "call_id", callID)
+					item = applyGeminiResponsesToolIdentity(item, toolIdentity, "")
+					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+					continue
+				}
 				item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
-				item, _ = sjson.SetBytes(item, "name", st.FuncNames[idx])
+				item = applyGeminiResponsesToolIdentity(item, toolIdentity, "")
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
 		}
@@ -842,7 +933,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
-	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+	sanitizedNameMap := util.SanitizedToolNameMap(reqJSON)
+	toolRegistry := geminiResponsesToolRegistry(reqJSON)
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -1079,18 +1172,28 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 				flushReasoningOutput()
 				flushMessageOutput()
-				name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
+				rawFunctionName := fc.Get("name").String()
+				toolIdentity := resolveGeminiResponsesToolIdentity(toolRegistry, sanitizedNameMap, rawFunctionName)
 				args := fc.Get("args")
-				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
-				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
-				itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
-				itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
-				itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
 				argsStr := ""
 				if args.Exists() {
 					argsStr = args.Raw
 				}
-				itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
+				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
+				var itemJSON []byte
+				if toolIdentity.custom {
+					itemJSON = []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("ctc_%s", callID))
+					itemJSON, _ = sjson.SetBytes(itemJSON, "input", unwrapGeminiResponsesCustomToolInput(argsStr))
+					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
+					itemJSON = applyGeminiResponsesToolIdentity(itemJSON, toolIdentity, "")
+				} else {
+					itemJSON = []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
+					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
+					itemJSON = applyGeminiResponsesToolIdentity(itemJSON, toolIdentity, "")
+				}
 				functionIndex := len(functionOutputs)
 				functionOutputs = append(functionOutputs, nonStreamFunctionOutput{item: itemJSON, signature: signature})
 				outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "function", index: functionIndex})
