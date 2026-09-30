@@ -948,6 +948,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				_ = outDoc.Set("request.generationConfig.thinkingConfig.thinkingLevel", "high")
 			}
 		}
+		if includeThoughts, active := thinking.ClaudeThinkingIncludesContent(rawJSON); active {
+			_ = outDoc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
+		}
 	}
 	if v := ojson.GetBytesNoCopy(rawJSON, "temperature"); v.Exists() && v.Type == ojson.Number {
 		_ = outDoc.Set("request.generationConfig.temperature", v.Num)

@@ -11,6 +11,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -376,6 +377,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 					_ = outDoc.Set("generationConfig.thinkingConfig.thinkingLevel", "high")
 				}
 			}
+		}
+		if includeThoughts, active := thinking.ClaudeThinkingIncludesContent(rawJSON); active {
+			_ = outDoc.Set("generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 		}
 	}
 	if v := ojson.GetBytesNoCopy(rawJSON, "temperature"); v.Exists() && v.Type == ojson.Number {
