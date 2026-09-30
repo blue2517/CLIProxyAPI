@@ -1284,7 +1284,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"level-subset-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":1}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
 			expectValue:     "low",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -1367,7 +1367,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 25: thinking.budget_tokens=64000 → clamped to 20000
@@ -1379,7 +1379,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":64000}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 26: thinking.budget_tokens=0 → clamped to 128
@@ -1403,7 +1403,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":-1}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "-1",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -1527,7 +1527,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 35: thinking.budget_tokens=64000 → clamped to 32768 (keeps budget)
@@ -1539,7 +1539,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":64000}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "32768",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 36: thinking.budget_tokens=0 → clamped to low
@@ -1563,7 +1563,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":-1}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "-1",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -1757,7 +1757,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 55: thinking.budget_tokens=64000 → clamped to 20000
@@ -1769,7 +1769,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":64000}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		// Case 56: thinking.budget_tokens=0 → 0 (ZeroAllowed=true)
@@ -1793,7 +1793,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":-1}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "-1",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -3083,7 +3083,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"level-subset-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
 			expectValue:     "high",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		{
@@ -3094,7 +3094,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "1024",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		{
@@ -3105,7 +3105,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		{
@@ -3116,7 +3116,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		{
@@ -3127,7 +3127,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 		{
@@ -3138,7 +3138,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
 			expectValue:     "high",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -3200,7 +3200,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON:       `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
-			includeThoughts: "",
+			includeThoughts: "true",
 			expectErr:       false,
 		},
 
@@ -3517,7 +3517,7 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				itVal := ojson.GetBytesNoCopy(body, path)
 				if wantIncludeThoughts == "" {
 					if itVal.Exists() {
-						t.Fatalf("includeThoughts should be absent without summary intent, body=%s", string(body))
+						t.Fatalf("includeThoughts should be absent, body=%s", string(body))
 					}
 				} else {
 					if !itVal.Exists() {
