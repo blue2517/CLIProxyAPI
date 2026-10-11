@@ -120,6 +120,33 @@ func TestAntigravityDynamicRegistrationExclusions(t *testing.T) {
 	}
 }
 
+func TestAntigravityDynamicRegistrationIncludesNativeFlashTiers(t *testing.T) {
+	svc := &Service{cfg: &config.Config{}}
+	auth := antigravityTestAuth("native-flash-tiers", "http://127.0.0.1:1")
+	hints := antigravityModelCapabilityHints{ModelIDs: make(map[string]struct{})}
+	for _, version := range []string{"3.6", "3.7", "3.8"} {
+		for _, tier := range []string{"high", "medium", "low"} {
+			hints.ModelIDs["gemini-"+version+"-flash-"+tier] = struct{}{}
+		}
+	}
+	models := svc.antigravityModelsForHints(auth, hints)
+	if len(models) != len(hints.ModelIDs) {
+		t.Fatalf("registered %d native tiers, want %d", len(models), len(hints.ModelIDs))
+	}
+	for _, model := range models {
+		if _, exists := hints.ModelIDs[model.ID]; !exists {
+			t.Fatalf("unexpected model ID: %s", model.ID)
+		}
+		delete(hints.ModelIDs, model.ID)
+		if model.ContextLength != 1048576 || model.MaxCompletionTokens != 65536 || model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+			t.Fatalf("native tier lost family metadata: %+v", model)
+		}
+	}
+	if len(hints.ModelIDs) != 0 {
+		t.Fatalf("missing native tiers: %v", hints.ModelIDs)
+	}
+}
+
 func TestAntigravityDynamicRegistrationBatches(t *testing.T) {
 	resetAntigravityCapabilityCache()
 	t.Cleanup(resetAntigravityCapabilityCache)
