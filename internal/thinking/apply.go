@@ -420,6 +420,20 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 		}
 	}
 
+	if !hasThinkingConfig(config) && !suffixResult.HasSuffix && !nativeResponses && providerFormat == "antigravity" {
+		if defaultCfg, ok := defaultAntigravityTierThinkingConfig(baseModel, modelInfo); ok {
+			config = defaultCfg
+			if summaryConfig.Mode == SummaryUnspecified && (!docValid || ExtractSummaryConfigDoc(doc, providerFormat).Mode == SummaryUnspecified) {
+				summaryConfig = SummaryConfig{Mode: SummaryEnabled}
+			}
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+				"level":    config.Level,
+			}).Debug("thinking: defaulted tier level for antigravity model |")
+		}
+	}
+
 	if !hasThinkingConfig(config) {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -520,6 +534,34 @@ func thinkingIsFullyDisabled(config ThinkingConfig) bool {
 
 func thinkingRequestedOff(config ThinkingConfig) bool {
 	return config.Mode == ModeNone || (config.Mode == ModeBudget && config.Budget == 0)
+}
+
+var antigravityTierDefaultLevels = []ThinkingLevel{
+	LevelXHigh,
+	LevelHigh,
+	LevelMedium,
+	LevelLow,
+}
+
+// defaultAntigravityTierThinkingConfig derives the implicit thinking level for
+// tiered Antigravity models (e.g. gemini-4-hydrogen-xhigh, claude-opus-5-5-high)
+// when the caller omits explicit thinking configuration.
+func defaultAntigravityTierThinkingConfig(baseModel string, modelInfo *registry.ModelInfo) (ThinkingConfig, bool) {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+		return ThinkingConfig{}, false
+	}
+	for _, candidate := range []string{baseModel, modelInfo.ID} {
+		trimmed := strings.ToLower(strings.TrimSpace(candidate))
+		if trimmed == "" {
+			continue
+		}
+		for _, level := range antigravityTierDefaultLevels {
+			if strings.HasSuffix(trimmed, "-"+string(level)) && isLevelSupported(string(level), modelInfo.Thinking.Levels) {
+				return ThinkingConfig{Mode: ModeLevel, Level: level}, true
+			}
+		}
+	}
+	return ThinkingConfig{}, false
 }
 
 func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *registry.ModelInfo) bool {
