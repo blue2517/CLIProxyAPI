@@ -166,7 +166,8 @@ func claudeOAuthTLSClientHelloSpec() *tls.ClientHelloSpec {
 // profile while retaining net/http proxy, cancellation, response parsing and
 // connection lifecycle semantics.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer   proxy.Dialer
+	proxyErr error
 	// sessionCache is shared by every transport built for the same proxy, so
 	// short-lived ClaudeAuth instances can still resume, while resumption never
 	// crosses proxy boundaries.
@@ -177,11 +178,12 @@ type utlsRoundTripper struct {
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	var proxyURL string
+	var proxyErr error
 	if cfg != nil {
 		proxyURL = cfg.ProxyURL
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
 		if errBuild != nil {
-			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
+			proxyErr = fmt.Errorf("claude oauth: invalid proxy configuration: %w", errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -189,6 +191,7 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 
 	roundTripper := &utlsRoundTripper{
 		dialer:       dialer,
+		proxyErr:     proxyErr,
 		sessionCache: claudeOAuthSessionCache(proxyURL),
 	}
 	roundTripper.transport = &http.Transport{
@@ -199,6 +202,9 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 }
 
 func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if t.proxyErr != nil {
+		return nil, t.proxyErr
+	}
 	var (
 		conn net.Conn
 		err  error
@@ -242,6 +248,9 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.proxyErr != nil {
+		return nil, t.proxyErr
+	}
 	return t.transport.RoundTrip(req)
 }
 
