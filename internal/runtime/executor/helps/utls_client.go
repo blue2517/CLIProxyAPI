@@ -339,7 +339,7 @@ func claudeCodeDialer(proxyURL string) proxy.Dialer {
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
-			log.Errorf("claude tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			dialer = claudeProxyError{err: fmt.Errorf("claude tls: invalid proxy configuration: %w", errBuild)}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
