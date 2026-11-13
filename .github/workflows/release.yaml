@@ -22,6 +22,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install ARM64 cross-compiler
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Fetch tags
@@ -39,16 +44,27 @@ jobs:
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o cli-proxy-api ./cmd/server/
           tar -czf "CLIProxyAPI_${RELEASE_VERSION}_linux_amd64.tar.gz" cli-proxy-api
+          rm -f cli-proxy-api
+
+          CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -o cli-proxy-api ./cmd/server/
+          tar -czf "CLIProxyAPI_${RELEASE_VERSION}_linux_arm64.tar.gz" cli-proxy-api
+          rm -f cli-proxy-api
       - name: Create Release and Upload
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          assets=(
+            "CLIProxyAPI_${RELEASE_VERSION}_linux_amd64.tar.gz"
+            "CLIProxyAPI_${RELEASE_VERSION}_linux_arm64.tar.gz"
+          )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "CLIProxyAPI_${RELEASE_VERSION}_linux_amd64.tar.gz" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              "CLIProxyAPI_${RELEASE_VERSION}_linux_amd64.tar.gz"
+              "${assets[@]}"
           fi
